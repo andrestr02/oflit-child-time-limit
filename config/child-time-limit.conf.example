@@ -1,0 +1,8 @@
+# OFLIT Child Time Limit
+# Format: username=seconds-per-day
+#
+# Examples:
+# child1=7200
+# child2=5400
+
+child1=7200
