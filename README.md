@@ -63,7 +63,7 @@ Clone the repository and run:
 ```bash
 git clone https://github.com/andrestr02/oflit-child-time-limit.git
 cd oflit-child-time-limit
-sudo ./install.sh
+sudo bash install.sh
 ```
 
 Then edit:
@@ -140,7 +140,7 @@ See [`docs/testing.md`](docs/testing.md) for commands and expected results.
 ## Uninstall
 
 ```bash
-sudo ./uninstall.sh
+sudo bash uninstall.sh
 ```
 
 The uninstaller removes the service and OFLIT PAM line. It does not delete usage state or configuration unless you explicitly choose to remove them afterward.
