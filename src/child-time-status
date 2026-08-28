@@ -1,0 +1,83 @@
+#!/usr/bin/python3
+
+import os
+import sys
+from datetime import datetime
+
+CONFIG = "/etc/child-time-limit.conf"
+STATE_DIR = "/var/lib/child-time-limit"
+
+
+def today():
+    return datetime.now().astimezone().date().isoformat()
+
+
+def load_limits():
+    limits = {}
+    with open(CONFIG) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            user, seconds = line.split("=", 1)
+            user = user.strip()
+            seconds = int(seconds.strip())
+            if user and seconds > 0:
+                limits[user] = seconds
+    return limits
+
+
+def read_used(user):
+    path = os.path.join(STATE_DIR, user + ".state")
+    try:
+        with open(path) as f:
+            parts = f.read().strip().split()
+        if len(parts) >= 2 and parts[0] == today():
+            return max(0.0, float(parts[1]))
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    return 0.0
+
+
+def fmt(seconds):
+    seconds = max(0, int(round(seconds)))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def main():
+    if os.geteuid() != 0:
+        print("Run as root: sudo child-time-status", file=sys.stderr)
+        return 1
+
+    try:
+        limits = load_limits()
+    except (OSError, ValueError) as exc:
+        print(f"Failed to read {CONFIG}: {exc}", file=sys.stderr)
+        return 1
+
+    if not limits:
+        print("No configured users.")
+        return 0
+
+    print(f"OFLIT Child Time Limit — {today()}")
+    print()
+    print(f"{'USER':<20} {'USED':>10} {'REMAINING':>10} {'LIMIT':>10} {'STATUS':>10}")
+    print("-" * 66)
+
+    for user in sorted(limits):
+        limit = float(limits[user])
+        used = min(read_used(user), limit)
+        remaining = max(0.0, limit - used)
+        status = "EXHAUSTED" if used >= limit else "AVAILABLE"
+        print(
+            f"{user:<20} {fmt(used):>10} {fmt(remaining):>10} "
+            f"{fmt(limit):>10} {status:>10}"
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
