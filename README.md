@@ -13,6 +13,7 @@ The project was created after testing desktop parental-control approaches that c
 - Uses a PAM account check to reject later logins on the same day.
 - Starts a fresh quota automatically when the local date changes.
 - Only enforces usernames explicitly listed in the configuration file.
+- Includes `child-time-status` for a simple daily usage summary.
 
 ## Architecture
 
@@ -90,15 +91,24 @@ sudo systemctl restart child-time-enforcer.service
 
 ## Check usage
 
+Use the installed status command:
+
 ```bash
-sudo find /var/lib/child-time-limit \
-  -maxdepth 1 \
-  -type f \
-  -name '*.state' \
-  -exec sh -c 'printf "%s: " "$1"; cat "$1"' _ {} \;
+sudo child-time-status
 ```
 
-A state file looks like:
+Example output:
+
+```text
+OFLIT Child Time Limit — 2026-08-28
+
+USER                       USED  REMAINING      LIMIT     STATUS
+------------------------------------------------------------------
+child1                 00:03:30   01:56:30   02:00:00  AVAILABLE
+child2                 02:00:00   00:00:00   02:00:00  EXHAUSTED
+```
+
+The raw state remains available under `/var/lib/child-time-limit/`. A state file looks like:
 
 ```text
 2026-08-28 210
@@ -129,7 +139,7 @@ Recommended acceptance sequence:
 1. Temporarily configure a test account for `120` seconds.
 2. Log in and use the account until quota exhaustion.
 3. Confirm the session is actually gone from `loginctl list-sessions`.
-4. Confirm the state file records `120`.
+4. Confirm the state file records the exhausted quota.
 5. Confirm the PAM helper returns denial for that user.
 6. Attempt a real login and confirm it is rejected.
 7. Reboot and confirm the same-day denial persists.
@@ -143,9 +153,11 @@ See [`docs/testing.md`](docs/testing.md) for commands and expected results.
 sudo bash uninstall.sh
 ```
 
-The uninstaller removes the service and OFLIT PAM line. It does not delete usage state or configuration unless you explicitly choose to remove them afterward.
+The uninstaller removes the service, helper commands, and OFLIT PAM line. It does not delete usage state or configuration unless you explicitly choose to remove them afterward.
 
 ## Project status
+
+**v1.0.0 candidate**
 
 The core behavior has been acceptance-tested for:
 
@@ -154,7 +166,10 @@ The core behavior has been acceptance-tested for:
 - same-day PAM re-login denial;
 - persistence across reboot;
 - daily reset semantics;
-- persistent usage accounting.
+- persistent usage accounting;
+- administrator-readable usage status.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for version notes.
 
 This is still a small community project. Review the code and test it on your own distribution before using it as a safety-critical control.
 
