@@ -1,0 +1,47 @@
+#!/usr/bin/python3
+
+import os
+import sys
+from datetime import datetime
+
+CONFIG = "/etc/child-time-limit.conf"
+STATE_DIR = "/var/lib/child-time-limit"
+
+username = os.environ.get("PAM_USER", "")
+
+limits = {}
+try:
+    with open(CONFIG) as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, seconds = line.split("=", 1)
+            name = name.strip()
+            seconds = int(seconds.strip())
+            if name and seconds > 0:
+                limits[name] = seconds
+except Exception:
+    # Fail open so configuration problems cannot lock out unrelated admins.
+    sys.exit(0)
+
+if username not in limits:
+    sys.exit(0)
+
+today = datetime.now().astimezone().date().isoformat()
+path = os.path.join(STATE_DIR, username + ".state")
+used = 0
+
+try:
+    with open(path) as handle:
+        parts = handle.read().strip().split()
+    if len(parts) >= 2 and parts[0] == today:
+        used = int(float(parts[1]))
+except (FileNotFoundError, ValueError, OSError):
+    pass
+
+if used >= limits[username]:
+    print("Daily computer time limit has been reached.")
+    sys.exit(1)
+
+sys.exit(0)
