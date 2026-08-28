@@ -36,6 +36,7 @@ cp -a "$PAM_FILE" "$BACKUP_DIR/common-account.$STAMP"
 
 install -m 0755 "$ROOT_DIR/src/child-time-enforcer" /usr/local/sbin/child-time-enforcer
 install -m 0755 "$ROOT_DIR/src/child-time-login-check" /usr/local/sbin/child-time-login-check
+install -m 0755 "$ROOT_DIR/src/child-time-status" /usr/local/sbin/child-time-status
 install -m 0644 "$ROOT_DIR/systemd/child-time-enforcer.service" /etc/systemd/system/child-time-enforcer.service
 
 if [[ ! -e /etc/child-time-limit.conf ]]; then
@@ -71,7 +72,9 @@ NEXT STEPS:
 2. Keep at least one administrator account out of that file.
 3. Restart the service after policy changes:
      sudo systemctl restart child-time-enforcer.service
-4. Perform the 120-second acceptance test documented in docs/testing.md.
+4. Check daily usage with:
+     sudo child-time-status
+5. Perform the 120-second acceptance test documented in docs/testing.md.
 
 If another parental-control time daemon is installed, disable its time-enforcement
 path before treating OFLIT Child Time Limit as the source of truth.
