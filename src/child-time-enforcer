@@ -1,0 +1,180 @@
+#!/usr/bin/python3
+
+import fcntl
+import os
+import subprocess
+import time
+from datetime import datetime
+
+CONFIG = "/etc/child-time-limit.conf"
+STATE_DIR = "/var/lib/child-time-limit"
+LOCK_FILE = "/run/child-time-limit.lock"
+POLL_SECONDS = 1.0
+
+os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+
+# Only one enforcer instance may run at a time.
+lock = open(LOCK_FILE, "w")
+fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def local_day():
+    return datetime.now().astimezone().date().isoformat()
+
+
+def load_limits():
+    limits = {}
+    try:
+        with open(CONFIG) as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                username, seconds = line.split("=", 1)
+                username = username.strip()
+                seconds = int(seconds.strip())
+                if username and seconds > 0:
+                    limits[username] = seconds
+    except Exception:
+        # Fail open if configuration cannot be parsed. Only explicitly
+        # configured accounts are ever enforced.
+        return {}
+    return limits
+
+
+def state_path(username):
+    return os.path.join(STATE_DIR, username + ".state")
+
+
+def read_state(username, day):
+    try:
+        with open(state_path(username)) as handle:
+            parts = handle.read().strip().split()
+        if len(parts) >= 2 and parts[0] == day:
+            return float(parts[1])
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    return 0.0
+
+
+def write_state(username, day, used):
+    path = state_path(username)
+    temporary = path + ".tmp"
+    persisted = int(used)
+
+    with open(temporary, "w") as handle:
+        handle.write(f"{day} {persisted}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    os.replace(temporary, path)
+    os.chmod(path, 0o600)
+
+
+def active_graphical_users(limits):
+    result = subprocess.run(
+        ["loginctl", "list-sessions", "--no-legend"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    users = set()
+
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+
+        session = fields[0]
+        details = subprocess.run(
+            [
+                "loginctl",
+                "show-session",
+                session,
+                "-p", "Name",
+                "-p", "Type",
+                "-p", "Class",
+                "-p", "Active",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        info = {}
+        for item in details.stdout.splitlines():
+            if "=" in item:
+                key, value = item.split("=", 1)
+                info[key] = value
+
+        username = info.get("Name", "")
+        if (
+            username in limits
+            and info.get("Class") == "user"
+            and info.get("Active") == "yes"
+            and info.get("Type") in ("wayland", "x11")
+        ):
+            users.add(username)
+
+    return users
+
+
+def terminate(username):
+    subprocess.run(
+        ["loginctl", "terminate-user", username],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+limits = load_limits()
+previous_active = active_graphical_users(limits)
+previous_tick = time.monotonic()
+usage_cache = {}
+cache_day = local_day()
+
+while True:
+    time.sleep(POLL_SECONDS)
+
+    now = time.monotonic()
+    elapsed = max(0.0, now - previous_tick)
+    previous_tick = now
+
+    day = local_day()
+    if day != cache_day:
+        usage_cache.clear()
+        cache_day = day
+
+    limits = load_limits()
+    current_active = active_graphical_users(limits)
+
+    # Charge the interval to users who were active at the start of it.
+    # A login/logout transition can therefore differ by at most one poll.
+    for username in previous_active:
+        if username not in limits:
+            continue
+
+        limit = limits[username]
+
+        if username not in usage_cache:
+            usage_cache[username] = read_state(username, day)
+
+        used = usage_cache[username]
+
+        if used >= limit:
+            write_state(username, day, limit)
+            terminate(username)
+            continue
+
+        used = min(float(limit), used + elapsed)
+        usage_cache[username] = used
+
+        # Persist before enforcement so reboot cannot restore consumed time.
+        write_state(username, day, used)
+
+        if used >= limit:
+            terminate(username)
+
+    previous_active = current_active
