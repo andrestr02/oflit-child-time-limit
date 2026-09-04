@@ -37,6 +37,7 @@ cp -a "$PAM_FILE" "$BACKUP_DIR/common-account.$STAMP"
 install -m 0755 "$ROOT_DIR/src/child-time-enforcer" /usr/local/sbin/child-time-enforcer
 install -m 0755 "$ROOT_DIR/src/child-time-login-check" /usr/local/sbin/child-time-login-check
 install -m 0755 "$ROOT_DIR/src/child-time-status" /usr/local/sbin/child-time-status
+install -m 0755 "$ROOT_DIR/src/child-time" /usr/local/sbin/child-time
 install -m 0644 "$ROOT_DIR/systemd/child-time-enforcer.service" /etc/systemd/system/child-time-enforcer.service
 
 if [[ ! -e /etc/child-time-limit.conf ]]; then
@@ -68,13 +69,17 @@ cat <<'EOF'
 OFLIT Child Time Limit installed.
 
 NEXT STEPS:
-1. Edit /etc/child-time-limit.conf and replace the example account.
+1. Edit /etc/child-time-limit.conf once to replace the example account.
 2. Keep at least one administrator account out of that file.
-3. Restart the service after policy changes:
-     sudo systemctl restart child-time-enforcer.service
-4. Check daily usage with:
-     sudo child-time-status
+3. Manage configured limits with the human-friendly CLI, for example:
+     sudo child-time status
+     sudo child-time set child1 2h
+     sudo child-time add child1 30m
+4. Policy changes are reloaded automatically; a service restart is not required.
 5. Perform the 120-second acceptance test documented in docs/testing.md.
+
+The legacy read-only command `sudo child-time-status` remains installed for
+compatibility.
 
 If another parental-control time daemon is installed, disable its time-enforcement
 path before treating OFLIT Child Time Limit as the source of truth.
