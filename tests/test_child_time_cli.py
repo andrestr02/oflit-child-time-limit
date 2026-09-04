@@ -1,20 +1,22 @@
 #!/usr/bin/python3
 
+import importlib.machinery
 import importlib.util
 import os
-import pwd
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "src" / "child-time"
 
-spec = importlib.util.spec_from_file_location("child_time_cli", SCRIPT)
+loader = importlib.machinery.SourceFileLoader("child_time_cli", str(SCRIPT))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+if spec is None:
+    raise RuntimeError(f"Cannot create import spec for {SCRIPT}")
 child_time = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(child_time)
+loader.exec_module(child_time)
 
 
 class ParseDurationTests(unittest.TestCase):
