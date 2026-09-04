@@ -1,0 +1,371 @@
+#!/usr/bin/python3
+
+import argparse
+import os
+import pwd
+import re
+import sys
+import tempfile
+from datetime import datetime, timedelta
+from pathlib import Path
+
+CONFIG = Path("/etc/child-time-limit.conf")
+STATE_DIR = Path("/var/lib/child-time-limit")
+USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]*[$]?$", re.IGNORECASE)
+DURATION_RE = re.compile(
+    r"^(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m)?(?:(?P<seconds>\d+)s)?$",
+    re.IGNORECASE,
+)
+
+
+class ChildTimeError(Exception):
+    pass
+
+
+def local_now():
+    return datetime.now().astimezone()
+
+
+def today():
+    return local_now().date().isoformat()
+
+
+def parse_duration(value):
+    raw = value.strip().lower()
+    if raw.isdigit():
+        seconds = int(raw)
+    else:
+        match = DURATION_RE.fullmatch(raw)
+        if not match or not any(match.groupdict().values()):
+            raise ChildTimeError(
+                "Invalid duration. Use forms such as 90m, 2h25m, 3h, or 30s."
+            )
+        hours = int(match.group("hours") or 0)
+        minutes = int(match.group("minutes") or 0)
+        secs = int(match.group("seconds") or 0)
+        seconds = hours * 3600 + minutes * 60 + secs
+
+    if seconds <= 0:
+        raise ChildTimeError("Duration must be greater than zero.")
+    return seconds
+
+
+def parse_clock(value, now=None):
+    now = now or local_now()
+    match = re.fullmatch(r"(?P<hour>\d{1,2}):(?P<minute>\d{2})", value.strip())
+    if not match:
+        raise ChildTimeError("Clock time must use HH:MM, for example 10:45.")
+
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ChildTimeError("Clock time is outside the valid 00:00-23:59 range.")
+
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        raise ChildTimeError("Until time must be later than the current local time.")
+    return target
+
+
+def fmt(seconds):
+    seconds = max(0, int(round(seconds)))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def human(seconds):
+    seconds = max(0, int(round(seconds)))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return "".join(parts)
+
+
+def validate_username(username, require_local=True):
+    if not USERNAME_RE.fullmatch(username):
+        raise ChildTimeError(f"Invalid Linux username: {username}")
+    if require_local:
+        try:
+            pwd.getpwnam(username)
+        except KeyError as exc:
+            raise ChildTimeError(f"Local user does not exist: {username}") from exc
+
+
+def load_config(path=CONFIG):
+    try:
+        raw_lines = path.read_text().splitlines()
+    except OSError as exc:
+        raise ChildTimeError(f"Cannot read {path}: {exc}") from exc
+
+    limits = {}
+    line_indexes = {}
+    for index, raw in enumerate(raw_lines):
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, seconds_raw = line.split("=", 1)
+        name = name.strip()
+        try:
+            seconds = int(seconds_raw.strip())
+        except ValueError as exc:
+            raise ChildTimeError(f"Invalid limit for {name!r} in {path}") from exc
+        if not name or seconds <= 0:
+            raise ChildTimeError(f"Invalid policy line in {path}: {raw}")
+        if name in limits:
+            raise ChildTimeError(f"Duplicate configured user in {path}: {name}")
+        limits[name] = seconds
+        line_indexes[name] = index
+
+    return raw_lines, limits, line_indexes
+
+
+def read_used(username, day=None, state_dir=STATE_DIR):
+    day = day or today()
+    path = state_dir / f"{username}.state"
+    try:
+        parts = path.read_text().strip().split()
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        raise ChildTimeError(f"Cannot read {path}: {exc}") from exc
+
+    if len(parts) < 2 or parts[0] != day:
+        return 0
+    try:
+        return max(0, int(float(parts[1])))
+    except ValueError as exc:
+        raise ChildTimeError(f"Invalid state in {path}") from exc
+
+
+def atomic_update_limit(username, new_limit, path=CONFIG):
+    raw_lines, limits, line_indexes = load_config(path)
+    if username not in limits:
+        raise ChildTimeError(f"User is not configured: {username}")
+    if new_limit <= 0:
+        raise ChildTimeError("Limit must be greater than zero.")
+
+    st = path.stat()
+    raw_lines[line_indexes[username]] = f"{username}={int(new_limit)}"
+    payload = "\n".join(raw_lines) + "\n"
+
+    fd = None
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+        with os.fdopen(fd, "w") as handle:
+            fd = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, st.st_mode & 0o7777)
+        os.chown(temporary, st.st_uid, st.st_gid)
+        os.replace(temporary, path)
+        temporary = None
+        dir_fd = os.open(path.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    return limits[username], int(new_limit)
+
+
+def require_root():
+    if os.geteuid() != 0:
+        raise ChildTimeError("Run as root, for example: sudo child-time status")
+
+
+def status_rows(selected=None):
+    _, limits, _ = load_config()
+    if selected is not None:
+        if selected not in limits:
+            raise ChildTimeError(f"User is not configured: {selected}")
+        names = [selected]
+    else:
+        names = sorted(limits)
+
+    rows = []
+    for username in names:
+        limit = limits[username]
+        used = min(read_used(username), limit)
+        remaining = max(0, limit - used)
+        status = "EXHAUSTED" if used >= limit else "AVAILABLE"
+        rows.append((username, used, remaining, limit, status))
+    return rows
+
+
+def print_status(selected=None):
+    rows = status_rows(selected)
+    print(f"OFLIT Child Time Limit — {today()}")
+    print()
+    print(f"{'USER':<20} {'USED':>10} {'REMAINING':>10} {'LIMIT':>10} {'STATUS':>10}")
+    print("-" * 66)
+    for username, used, remaining, limit, status in rows:
+        print(
+            f"{username:<20} {fmt(used):>10} {fmt(remaining):>10} "
+            f"{fmt(limit):>10} {status:>10}"
+        )
+
+
+def confirm_reduction(username, used, old_limit, new_limit, force=False):
+    if new_limit > used or force:
+        return
+    raise ChildTimeError(
+        f"Refusing to set {username} to {human(new_limit)} because {human(used)} "
+        f"has already been used today. Re-run with --force to exhaust the quota "
+        f"immediately. Current limit: {human(old_limit)}."
+    )
+
+
+def apply_limit(username, new_limit, force=False, reason=None):
+    validate_username(username)
+    _, limits, _ = load_config()
+    if username not in limits:
+        raise ChildTimeError(f"User is not configured: {username}")
+    old_limit = limits[username]
+    used = read_used(username)
+    confirm_reduction(username, used, old_limit, new_limit, force=force)
+    old_limit, new_limit = atomic_update_limit(username, new_limit)
+    remaining = max(0, new_limit - used)
+
+    print(f"User       : {username}")
+    print(f"Used today : {fmt(used)} ({human(used)})")
+    print(f"Old limit  : {fmt(old_limit)} ({human(old_limit)})")
+    print(f"New limit  : {fmt(new_limit)} ({human(new_limit)})")
+    print(f"Remaining  : {fmt(remaining)} ({human(remaining)})")
+    if reason:
+        print(f"Mode       : {reason}")
+    print("Reload     : automatic; service restart is not required")
+
+
+def command_set(args):
+    apply_limit(args.username, parse_duration(args.duration), force=args.force)
+
+
+def command_add(args):
+    validate_username(args.username)
+    _, limits, _ = load_config()
+    if args.username not in limits:
+        raise ChildTimeError(f"User is not configured: {args.username}")
+    delta = parse_duration(args.duration)
+    apply_limit(args.username, limits[args.username] + delta, reason=f"add {human(delta)}")
+
+
+def command_subtract(args):
+    validate_username(args.username)
+    _, limits, _ = load_config()
+    if args.username not in limits:
+        raise ChildTimeError(f"User is not configured: {args.username}")
+    delta = parse_duration(args.duration)
+    new_limit = limits[args.username] - delta
+    if new_limit <= 0:
+        raise ChildTimeError("Subtract would make the daily limit zero or negative.")
+    apply_limit(
+        args.username,
+        new_limit,
+        force=args.force,
+        reason=f"subtract {human(delta)}",
+    )
+
+
+def command_until(args):
+    validate_username(args.username)
+    _, limits, _ = load_config()
+    if args.username not in limits:
+        raise ChildTimeError(f"User is not configured: {args.username}")
+
+    now = local_now()
+    target = parse_clock(args.clock, now=now)
+    used = read_used(args.username)
+    seconds_until = int((target - now).total_seconds())
+    new_limit = used + seconds_until
+    apply_limit(
+        args.username,
+        new_limit,
+        reason=f"continuous active use until {target.strftime('%H:%M')}",
+    )
+    print(
+        "Note       : 'until' converts the wall-clock target into remaining active "
+        "usage. If the child logs out or is inactive, the quota does not expire "
+        "just because that clock time passes."
+    )
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="child-time",
+        description="Human-friendly administrator CLI for OFLIT Child Time Limit.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    status = sub.add_parser("status", help="show daily usage and remaining quota")
+    status.add_argument("username", nargs="?")
+
+    set_cmd = sub.add_parser("set", help="set a user's total daily limit")
+    set_cmd.add_argument("username")
+    set_cmd.add_argument("duration")
+    set_cmd.add_argument("--force", action="store_true")
+
+    add = sub.add_parser("add", help="add time to a user's total daily limit")
+    add.add_argument("username")
+    add.add_argument("duration")
+
+    subtract = sub.add_parser("subtract", help="subtract time from a user's daily limit")
+    subtract.add_argument("username")
+    subtract.add_argument("duration")
+    subtract.add_argument("--force", action="store_true")
+
+    until = sub.add_parser(
+        "until",
+        help="set enough remaining active-use quota to reach a local HH:MM target",
+    )
+    until.add_argument("username")
+    until.add_argument("clock")
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        require_root()
+        if args.command == "status":
+            if args.username:
+                validate_username(args.username)
+            print_status(args.username)
+        elif args.command == "set":
+            command_set(args)
+        elif args.command == "add":
+            command_add(args)
+        elif args.command == "subtract":
+            command_subtract(args)
+        elif args.command == "until":
+            command_until(args)
+        else:
+            parser.error("unknown command")
+    except ChildTimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
