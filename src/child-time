@@ -1,11 +1,13 @@
 #!/usr/bin/python3
 
 import argparse
+import fcntl
 import os
 import pwd
 import re
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -98,7 +100,9 @@ def validate_username(username, require_local=True):
             raise ChildTimeError(f"Local user does not exist: {username}") from exc
 
 
-def load_config(path=CONFIG):
+def load_config(path=None):
+    if path is None:
+        path = CONFIG
     try:
         raw_lines = path.read_text().splitlines()
     except OSError as exc:
@@ -126,7 +130,9 @@ def load_config(path=CONFIG):
     return raw_lines, limits, line_indexes
 
 
-def read_used(username, day=None, state_dir=STATE_DIR):
+def read_used(username, day=None, state_dir=None):
+    if state_dir is None:
+        state_dir = STATE_DIR
     day = day or today()
     path = state_dir / f"{username}.state"
     try:
@@ -144,14 +150,39 @@ def read_used(username, day=None, state_dir=STATE_DIR):
         raise ChildTimeError(f"Invalid state in {path}") from exc
 
 
-def atomic_update_limit(username, new_limit, path=CONFIG):
+@contextmanager
+def policy_lock(path=None):
+    if path is None:
+        path = CONFIG
+    lock_path = path.with_name(path.name + ".lock")
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as exc:
+        if "fd" in locals():
+            os.close(fd)
+        raise ChildTimeError(f"Cannot lock {lock_path}: {exc}") from exc
+
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _atomic_update_limit_locked(username, new_limit, path):
     raw_lines, limits, line_indexes = load_config(path)
     if username not in limits:
         raise ChildTimeError(f"User is not configured: {username}")
     if new_limit <= 0:
         raise ChildTimeError("Limit must be greater than zero.")
 
-    st = path.stat()
+    try:
+        st = path.stat()
+    except OSError as exc:
+        raise ChildTimeError(f"Cannot inspect {path}: {exc}") from exc
     raw_lines[line_indexes[username]] = f"{username}={int(new_limit)}"
     payload = "\n".join(raw_lines) + "\n"
 
@@ -173,6 +204,8 @@ def atomic_update_limit(username, new_limit, path=CONFIG):
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
+    except OSError as exc:
+        raise ChildTimeError(f"Cannot update {path}: {exc}") from exc
     finally:
         if fd is not None:
             os.close(fd)
@@ -183,6 +216,13 @@ def atomic_update_limit(username, new_limit, path=CONFIG):
                 pass
 
     return limits[username], int(new_limit)
+
+
+def atomic_update_limit(username, new_limit, path=None):
+    if path is None:
+        path = CONFIG
+    with policy_lock(path):
+        return _atomic_update_limit_locked(username, new_limit, path)
 
 
 def require_root():
@@ -202,7 +242,7 @@ def status_rows(selected=None):
     rows = []
     for username in names:
         limit = limits[username]
-        used = min(read_used(username), limit)
+        used = read_used(username)
         remaining = max(0, limit - used)
         status = "EXHAUSTED" if used >= limit else "AVAILABLE"
         rows.append((username, used, remaining, limit, status))
@@ -232,15 +272,25 @@ def confirm_reduction(username, used, old_limit, new_limit, force=False):
     )
 
 
-def apply_limit(username, new_limit, force=False, reason=None):
+def apply_limit(username, calculate_limit, force=False, reason=None, path=None):
     validate_username(username)
-    _, limits, _ = load_config()
-    if username not in limits:
-        raise ChildTimeError(f"User is not configured: {username}")
-    old_limit = limits[username]
-    used = read_used(username)
-    confirm_reduction(username, used, old_limit, new_limit, force=force)
-    old_limit, new_limit = atomic_update_limit(username, new_limit)
+    if path is None:
+        path = CONFIG
+    with policy_lock(path):
+        _, limits, _ = load_config(path)
+        if username not in limits:
+            raise ChildTimeError(f"User is not configured: {username}")
+        old_limit = limits[username]
+        used = read_used(username)
+        new_limit = (
+            calculate_limit(old_limit, used)
+            if callable(calculate_limit)
+            else calculate_limit
+        )
+        if new_limit <= 0:
+            raise ChildTimeError("Limit must be greater than zero.")
+        confirm_reduction(username, used, old_limit, new_limit, force=force)
+        old_limit, new_limit = _atomic_update_limit_locked(username, new_limit, path)
     remaining = max(0, new_limit - used)
 
     print(f"User       : {username}")
@@ -258,45 +308,37 @@ def command_set(args):
 
 
 def command_add(args):
-    validate_username(args.username)
-    _, limits, _ = load_config()
-    if args.username not in limits:
-        raise ChildTimeError(f"User is not configured: {args.username}")
     delta = parse_duration(args.duration)
-    apply_limit(args.username, limits[args.username] + delta, reason=f"add {human(delta)}")
+    apply_limit(
+        args.username,
+        lambda old_limit, used: old_limit + delta,
+        reason=f"add {human(delta)}",
+    )
 
 
 def command_subtract(args):
-    validate_username(args.username)
-    _, limits, _ = load_config()
-    if args.username not in limits:
-        raise ChildTimeError(f"User is not configured: {args.username}")
     delta = parse_duration(args.duration)
-    new_limit = limits[args.username] - delta
-    if new_limit <= 0:
-        raise ChildTimeError("Subtract would make the daily limit zero or negative.")
+    def subtract(old_limit, used):
+        new_limit = old_limit - delta
+        if new_limit <= 0:
+            raise ChildTimeError("Subtract would make the daily limit zero or negative.")
+        return new_limit
+
     apply_limit(
         args.username,
-        new_limit,
+        subtract,
         force=args.force,
         reason=f"subtract {human(delta)}",
     )
 
 
 def command_until(args):
-    validate_username(args.username)
-    _, limits, _ = load_config()
-    if args.username not in limits:
-        raise ChildTimeError(f"User is not configured: {args.username}")
-
     now = local_now()
     target = parse_clock(args.clock, now=now)
-    used = read_used(args.username)
     seconds_until = int((target - now).total_seconds())
-    new_limit = used + seconds_until
     apply_limit(
         args.username,
-        new_limit,
+        lambda old_limit, used: used + seconds_until,
         reason=f"continuous active use until {target.strftime('%H:%M')}",
     )
     print(
