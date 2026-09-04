@@ -164,7 +164,8 @@ while True:
         used = usage_cache[username]
 
         if used >= limit:
-            write_state(username, day, limit)
+            # A policy reduction must never erase already-consumed usage.
+            # Keep the historical state as-is and enforce the new lower limit.
             terminate(username)
             continue
 
