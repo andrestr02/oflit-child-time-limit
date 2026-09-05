@@ -14,6 +14,7 @@ The project was created after testing desktop parental-control approaches that c
 - Starts a fresh quota automatically when the local date changes.
 - Only enforces usernames explicitly listed in the configuration file.
 - Includes `child-time-status` for a simple daily usage summary.
+- Includes `child-time` for human-friendly policy administration without manually calculating seconds.
 
 ## Architecture
 
@@ -67,7 +68,7 @@ cd oflit-child-time-limit
 sudo bash install.sh
 ```
 
-Then edit:
+On first install, configure the child accounts in:
 
 ```text
 /etc/child-time-limit.conf
@@ -81,17 +82,52 @@ child1=7200
 child2=7200
 ```
 
-`7200` seconds = 2 hours.
+The low-level file format remains seconds for compatibility, but routine administration should use the `child-time` command instead of editing seconds manually.
 
-Restart after changing the policy:
+## Manage time limits
+
+Show all configured users:
 
 ```bash
-sudo systemctl restart child-time-enforcer.service
+sudo child-time status
 ```
+
+Show one user:
+
+```bash
+sudo child-time status child1
+```
+
+Set a total daily limit using human-friendly durations:
+
+```bash
+sudo child-time set child1 2h25m
+sudo child-time set child1 90m
+sudo child-time set child1 3h
+```
+
+Add or subtract time:
+
+```bash
+sudo child-time add child1 30m
+sudo child-time subtract child1 15m
+```
+
+If a reduction would put the new limit at or below time already consumed today, the CLI refuses it by default. An administrator may explicitly accept immediate exhaustion with `--force`.
+
+Set enough remaining active-use quota to reach a local clock target:
+
+```bash
+sudo child-time until child1 10:45
+```
+
+`until` is intentionally defined in terms of **remaining active usage**. It converts the current wall-clock interval into quota. If the child logs out or becomes inactive, unused quota remains; this is not a hard wall-clock logout schedule.
+
+Policy changes are read automatically by the enforcer. **A service restart is not required after changing a limit.**
 
 ## Check usage
 
-Use the installed status command:
+The legacy read-only command remains available:
 
 ```bash
 sudo child-time-status
@@ -122,6 +158,8 @@ Configuration and state are root-owned. Child accounts should be ordinary non-su
 
 The login checker is intentionally **fail-open for users not listed in the policy**. A malformed configuration therefore should not accidentally lock out an administrator account.
 
+The management CLI requires root. Config updates are written atomically, preserve ownership and permissions, reject unknown/unconfigured users, and protect reductions below already-consumed time unless `--force` is explicitly supplied.
+
 Before deployment, make sure at least one administrator/root recovery path remains available.
 
 ## Interaction with other parental-control software
@@ -144,8 +182,17 @@ Recommended acceptance sequence:
 6. Attempt a real login and confirm it is rejected.
 7. Reboot and confirm the same-day denial persists.
 8. Simulate or wait for the next calendar day and confirm a new daily quota starts.
+9. Verify `child-time set/add/subtract/until` without restarting the service.
 
 See [`docs/testing.md`](docs/testing.md) for commands and expected results.
+
+## Development tests
+
+The CLI parser and atomic policy update behavior have standard-library unit tests:
+
+```bash
+python3 -m unittest tests/test_child_time_cli.py
+```
 
 ## Uninstall
 
@@ -157,17 +204,11 @@ The uninstaller removes the service, helper commands, and OFLIT PAM line. It doe
 
 ## Project status
 
-**v1.0.0 candidate**
+**v1.1.0 development**
 
-The core behavior has been acceptance-tested for:
+The v1.0 core behavior has been acceptance-tested for quota exhaustion, true session termination, same-day PAM re-login denial, persistence across reboot, daily reset semantics, persistent usage accounting, and administrator-readable usage status.
 
-- quota exhaustion;
-- true session termination;
-- same-day PAM re-login denial;
-- persistence across reboot;
-- daily reset semantics;
-- persistent usage accounting;
-- administrator-readable usage status.
+The v1.1 branch adds a unified human-friendly administrator CLI. It must still pass local tests and production acceptance before release.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for version notes.
 

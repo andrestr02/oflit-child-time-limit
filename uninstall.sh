@@ -32,6 +32,7 @@ fi
 rm -f /usr/local/sbin/child-time-enforcer
 rm -f /usr/local/sbin/child-time-login-check
 rm -f /usr/local/sbin/child-time-status
+rm -f /usr/local/sbin/child-time
 
 cat <<'EOF'
 OFLIT Child Time Limit has been disabled and its PAM rule removed.
