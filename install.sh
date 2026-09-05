@@ -55,7 +55,8 @@ if ! grep -Fqx "$PAM_RULE" "$PAM_FILE"; then
 fi
 
 systemctl daemon-reload
-systemctl enable --now child-time-enforcer.service
+systemctl enable child-time-enforcer.service
+systemctl restart child-time-enforcer.service
 
 if ! systemctl is-active --quiet child-time-enforcer.service; then
   echo "Enforcer failed to start. Restoring PAM backup." >&2

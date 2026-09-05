@@ -291,5 +291,75 @@ class StatusRowsTests(unittest.TestCase):
             with mock.patch.object(child_time, "STATE_DIR", Path(tempdir)):
                 self.assertEqual(child_time.read_used("child"), 0)
 
+
+class InstallerUpgradeTests(unittest.TestCase):
+    def test_installer_explicitly_restarts_enforcer_after_upgrade(self):
+        installer = (ROOT / "install.sh").read_text()
+
+        enable = "systemctl enable child-time-enforcer.service"
+        restart = "systemctl restart child-time-enforcer.service"
+        old_enable_now = "systemctl enable --now child-time-enforcer.service"
+
+        self.assertIn(enable, installer)
+        self.assertIn(restart, installer)
+        self.assertNotIn(old_enable_now, installer)
+
+        artifact_install = (
+            'install -m 0755 "$ROOT_DIR/src/child-time-enforcer" '
+            '/usr/local/sbin/child-time-enforcer'
+        )
+        daemon_reload = "systemctl daemon-reload"
+
+        self.assertLess(installer.index(artifact_install), installer.index(daemon_reload))
+        self.assertLess(installer.index(daemon_reload), installer.index(restart))
+
+
+class LegacyStatusTests(unittest.TestCase):
+    def test_usage_above_limit_is_reported_without_capping(self):
+        script = ROOT / "src" / "child-time-status"
+        loader = importlib.machinery.SourceFileLoader(
+            "child_time_legacy_status", str(script)
+        )
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        if spec is None:
+            self.fail(f"Cannot create import spec for {script}")
+
+        legacy_status = importlib.util.module_from_spec(spec)
+        loader.exec_module(legacy_status)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            config = root / "child-time-limit.conf"
+            state_dir = root / "state"
+            state_dir.mkdir()
+
+            config.write_text("child=3600\n")
+            (state_dir / "child.state").write_text(
+                f"{legacy_status.today()} 5400\n"
+            )
+
+            legacy_status.CONFIG = str(config)
+            legacy_status.STATE_DIR = str(state_dir)
+
+            output = StringIO()
+            with mock.patch.object(legacy_status.os, "geteuid", return_value=0), \
+                 redirect_stdout(output):
+                rc = legacy_status.main()
+
+            self.assertEqual(rc, 0)
+
+            row = next(
+                line
+                for line in output.getvalue().splitlines()
+                if line.startswith("child")
+            )
+            fields = row.split()
+
+            self.assertEqual(fields[0], "child")
+            self.assertEqual(fields[1], "01:30:00")
+            self.assertEqual(fields[2], "00:00:00")
+            self.assertEqual(fields[3], "01:00:00")
+            self.assertEqual(fields[4], "EXHAUSTED")
+
 if __name__ == "__main__":
     unittest.main()

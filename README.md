@@ -204,11 +204,11 @@ The uninstaller removes the service, helper commands, and OFLIT PAM line. It doe
 
 ## Project status
 
-**v1.1.0 development**
+**v1.1.1 maintenance**
 
-The v1.0 core behavior has been acceptance-tested for quota exhaustion, true session termination, same-day PAM re-login denial, persistence across reboot, daily reset semantics, persistent usage accounting, and administrator-readable usage status.
+v1.1.0 has been released and production-accepted with the unified human-friendly administrator CLI, atomic policy transactions, concurrent-update protection, reduction guards, and persistent usage preservation.
 
-The v1.1 branch adds a unified human-friendly administrator CLI. It must still pass local tests and production acceptance before release.
+v1.1.1 is a focused maintenance patch that ensures an upgraded enforcer is explicitly restarted so the running process uses the newly installed artifact, and aligns legacy `child-time-status` usage reporting with the unified CLI when consumed usage exceeds a force-reduced limit.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for version notes.
 
