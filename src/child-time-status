@@ -68,7 +68,7 @@ def main():
 
     for user in sorted(limits):
         limit = float(limits[user])
-        used = min(read_used(user), limit)
+        used = read_used(user)
         remaining = max(0.0, limit - used)
         status = "EXHAUSTED" if used >= limit else "AVAILABLE"
         print(
