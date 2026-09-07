@@ -2,14 +2,9 @@
 
 import importlib.machinery
 import importlib.util
-import multiprocessing
-import os
 import tempfile
-import threading
 import unittest
-from argparse import Namespace
-from contextlib import redirect_stdout
-from datetime import datetime, timezone
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -25,284 +20,208 @@ child_time = importlib.util.module_from_spec(spec)
 loader.exec_module(child_time)
 
 
-def process_add_worker(script, config, barrier, results):
-    try:
-        worker_loader = importlib.machinery.SourceFileLoader(
-            f"child_time_worker_{os.getpid()}", script
-        )
-        worker_spec = importlib.util.spec_from_loader(
-            worker_loader.name, worker_loader
-        )
-        worker_module = importlib.util.module_from_spec(worker_spec)
-        worker_loader.exec_module(worker_module)
-        worker_module.validate_username = lambda username: None
-        worker_module.read_used = lambda username: 0
-        barrier.wait(timeout=5)
-        with redirect_stdout(StringIO()):
-            worker_module.apply_limit(
-                "hudzaifah",
-                lambda old_limit, used: old_limit + 300,
-                path=Path(config),
-            )
-        results.put(None)
-    except BaseException as exc:
-        results.put(f"{type(exc).__name__}: {exc}")
+def _write_fake_core(path, marker):
+    path.write_text(f'MARKER = "{marker}"\n')
 
 
-class ParseDurationTests(unittest.TestCase):
-    def test_human_durations(self):
-        self.assertEqual(child_time.parse_duration("90m"), 5400)
-        self.assertEqual(child_time.parse_duration("2h25m"), 8700)
-        self.assertEqual(child_time.parse_duration("3h"), 10800)
-        self.assertEqual(child_time.parse_duration("30s"), 30)
+class RequireRootTests(unittest.TestCase):
+    def test_require_root_raises_when_not_root(self):
+        with mock.patch.object(child_time.os, "geteuid", return_value=1000):
+            with self.assertRaises(child_time.ChildTimeError):
+                child_time.require_root()
 
-    def test_plain_integer_means_seconds_for_backward_compatibility(self):
-        self.assertEqual(child_time.parse_duration("7200"), 7200)
-
-    def test_invalid_duration(self):
-        for value in ("", "0m", "-5m", "2 hours", "1h30x"):
-            with self.subTest(value=value):
-                with self.assertRaises(child_time.ChildTimeError):
-                    child_time.parse_duration(value)
+    def test_require_root_passes_when_root(self):
+        with mock.patch.object(child_time.os, "geteuid", return_value=0):
+            child_time.require_root()
 
 
-class ClockTests(unittest.TestCase):
-    def test_parse_future_clock(self):
-        now = datetime(2026, 9, 4, 9, 11, tzinfo=timezone.utc)
-        target = child_time.parse_clock("10:45", now=now)
-        self.assertEqual(target.hour, 10)
-        self.assertEqual(target.minute, 45)
+class DelegationTests(unittest.TestCase):
+    """The CLI must not reimplement policy logic; it re-exports the core."""
 
-    def test_reject_past_clock(self):
-        now = datetime(2026, 9, 4, 10, 0, tzinfo=timezone.utc)
-        with self.assertRaises(child_time.ChildTimeError):
-            child_time.parse_clock("09:59", now=now)
+    def test_cli_names_are_the_core_implementation(self):
+        for name in (
+            "ChildTimeError",
+            "StatusRow",
+            "LimitMutationResult",
+            "parse_duration",
+            "parse_clock",
+            "validate_username",
+            "load_config",
+            "read_used",
+            "policy_lock",
+            "atomic_update_limit",
+            "confirm_reduction",
+            "status_rows",
+            "apply_limit_transaction",
+            "local_now",
+            "today",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(child_time, name), getattr(child_time.core, name))
 
 
-class ConfigUpdateTests(unittest.TestCase):
+class StatusOutputTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.config = self.root / "child-time-limit.conf"
-        self.config.write_text(
-            "# username=seconds-per-day\nazzahra=7200\nhudzaifah=7200\nibrohim=7200\n"
-        )
-        os.chmod(self.config, 0o600)
+        self.state_dir = self.root / "state"
+        self.state_dir.mkdir()
+        self.config.write_text("child=3600\n")
+        (self.state_dir / "child.state").write_text(f"{child_time.today()} 5400\n")
 
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def test_atomic_update_preserves_other_users_and_mode(self):
-        old_limit, new_limit = child_time.atomic_update_limit(
-            "hudzaifah", 8700, path=self.config
+    def test_status_reports_raw_usage_above_limit_without_capping(self):
+        output = StringIO()
+        with mock.patch.object(child_time.core, "CONFIG", self.config), \
+             mock.patch.object(child_time.core, "STATE_DIR", self.state_dir), \
+             redirect_stdout(output):
+            child_time.print_status()
+
+        row = next(
+            line for line in output.getvalue().splitlines() if line.startswith("child")
         )
-        self.assertEqual(old_limit, 7200)
-        self.assertEqual(new_limit, 8700)
-        self.assertEqual(
-            self.config.read_text(),
-            "# username=seconds-per-day\nazzahra=7200\nhudzaifah=8700\nibrohim=7200\n",
+        fields = row.split()
+        self.assertEqual(fields[0], "child")
+        self.assertEqual(fields[1], "01:30:00")  # used: 5400s, never capped to limit
+        self.assertEqual(fields[2], "00:00:00")  # remaining
+        self.assertEqual(fields[3], "01:00:00")  # limit
+        self.assertEqual(fields[4], "EXHAUSTED")
+
+
+class CommandDispatchTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.config = self.root / "child-time-limit.conf"
+        self.state_dir = self.root / "state"
+        self.state_dir.mkdir()
+        self.config.write_text("hudzaifah=7200\n")
+        self.root_patch = mock.patch.object(child_time.os, "geteuid", return_value=0)
+        self.config_patch = mock.patch.object(child_time.core, "CONFIG", self.config)
+        self.state_patch = mock.patch.object(
+            child_time.core, "STATE_DIR", self.state_dir
         )
-        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
+        self.username_patch = mock.patch.object(
+            child_time.core, "validate_username",
+            lambda username, require_local=True: None,
+        )
+        self.root_patch.start()
+        self.config_patch.start()
+        self.state_patch.start()
+        self.username_patch.start()
+        self.addCleanup(self.root_patch.stop)
+        self.addCleanup(self.config_patch.stop)
+        self.addCleanup(self.state_patch.stop)
+        self.addCleanup(self.username_patch.stop)
+        self.addCleanup(self.tempdir.cleanup)
 
-    def test_unknown_user_refused(self):
-        with self.assertRaises(child_time.ChildTimeError):
-            child_time.atomic_update_limit("unknown", 3600, path=self.config)
+    def _run(self, argv):
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = child_time.main(argv)
+        return rc, out.getvalue(), err.getvalue()
 
-    def test_duplicate_user_refused(self):
-        self.config.write_text("child=3600\nchild=7200\n")
-        with self.assertRaises(child_time.ChildTimeError):
-            child_time.load_config(self.config)
+    def test_set_command(self):
+        rc, out, _ = self._run(["set", "hudzaifah", "2h25m"])
+        self.assertEqual(rc, 0)
+        self.assertIn("New limit  : 02:25:00 (2h25m)", out)
+        _, limits, _ = child_time.load_config(self.config)
+        self.assertEqual(limits["hudzaifah"], 8700)
 
-    def test_runtime_default_config_is_patchable(self):
-        with mock.patch.object(child_time, "CONFIG", self.config):
-            _, limits, _ = child_time.load_config()
+    def test_add_command(self):
+        rc, out, _ = self._run(["add", "hudzaifah", "5m"])
+        self.assertEqual(rc, 0)
+        self.assertIn("Mode       : add 5m", out)
+        _, limits, _ = child_time.load_config(self.config)
+        self.assertEqual(limits["hudzaifah"], 7500)
+
+    def test_subtract_command(self):
+        rc, out, _ = self._run(["subtract", "hudzaifah", "5m"])
+        self.assertEqual(rc, 0)
+        self.assertIn("Mode       : subtract 5m", out)
+        _, limits, _ = child_time.load_config(self.config)
+        self.assertEqual(limits["hudzaifah"], 6900)
+
+    def test_until_command_uses_authoritative_usage(self):
+        now = child_time.local_now().replace(hour=9, minute=0, second=0, microsecond=0)
+        (self.state_dir / "hudzaifah.state").write_text(f"{child_time.today()} 1800\n")
+        with mock.patch.object(child_time.core, "local_now", return_value=now):
+            rc, out, _ = self._run(["until", "hudzaifah", "10:00"])
+        self.assertEqual(rc, 0)
+        self.assertIn("continuous active use until 10:00", out)
+        _, limits, _ = child_time.load_config(self.config)
+        self.assertEqual(limits["hudzaifah"], 1800 + 3600)
+
+    def test_reduction_without_force_is_rejected(self):
+        (self.state_dir / "hudzaifah.state").write_text(f"{child_time.today()} 4000\n")
+        rc, out, err = self._run(["subtract", "hudzaifah", "1h"])
+        self.assertEqual(rc, 2)
+        self.assertIn("ERROR", err)
+        _, limits, _ = child_time.load_config(self.config)
         self.assertEqual(limits["hudzaifah"], 7200)
 
-    def test_concurrent_adds_do_not_lose_an_update(self):
-        barrier = threading.Barrier(3)
-        errors = []
-
-        def add_time():
-            try:
-                barrier.wait()
-                child_time.command_add(Namespace(username="hudzaifah", duration="5m"))
-            except Exception as exc:  # surfaced in the main test thread below
-                errors.append(exc)
-
-        with mock.patch.object(child_time, "CONFIG", self.config), \
-             mock.patch.object(child_time, "validate_username"), \
-             mock.patch.object(child_time, "read_used", return_value=0), \
-             redirect_stdout(StringIO()):
-            threads = [threading.Thread(target=add_time) for _ in range(2)]
-            for thread in threads:
-                thread.start()
-            barrier.wait()
-            for thread in threads:
-                thread.join(timeout=5)
-
-        self.assertFalse(errors)
-        self.assertTrue(all(not thread.is_alive() for thread in threads))
-        _, limits, _ = child_time.load_config(self.config)
-        self.assertEqual(limits["hudzaifah"], 7800)
-
-    def test_concurrent_subtracts_do_not_lose_an_update(self):
-        barrier = threading.Barrier(3)
-        errors = []
-
-        def subtract_time():
-            try:
-                barrier.wait()
-                child_time.command_subtract(
-                    Namespace(username="hudzaifah", duration="5m", force=False)
-                )
-            except Exception as exc:  # surfaced in the main test thread below
-                errors.append(exc)
-
-        with mock.patch.object(child_time, "CONFIG", self.config), \
-             mock.patch.object(child_time, "validate_username"), \
-             mock.patch.object(child_time, "read_used", return_value=0), \
-             redirect_stdout(StringIO()):
-            threads = [threading.Thread(target=subtract_time) for _ in range(2)]
-            for thread in threads:
-                thread.start()
-            barrier.wait()
-            for thread in threads:
-                thread.join(timeout=5)
-
-        self.assertFalse(errors)
-        self.assertTrue(all(not thread.is_alive() for thread in threads))
-        _, limits, _ = child_time.load_config(self.config)
-        self.assertEqual(limits["hudzaifah"], 6600)
-
-    @unittest.skipUnless(
-        os.name == "posix" and hasattr(child_time.fcntl, "flock"),
-        "requires POSIX flock semantics",
-    )
-    def test_separate_process_adds_do_not_lose_an_update(self):
-        context = multiprocessing.get_context("fork")
-        barrier = context.Barrier(3)
-        results = context.Queue()
-        processes = [
-            context.Process(
-                target=process_add_worker,
-                args=(str(SCRIPT), str(self.config), barrier, results),
-            )
-            for _ in range(2)
-        ]
-        for process in processes:
-            process.start()
-        barrier.wait(timeout=5)
-        for process in processes:
-            process.join(timeout=5)
-        for process in processes:
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=5)
-
-        child_results = [results.get(timeout=1) for _ in processes]
-        self.assertEqual(child_results, [None, None])
-        self.assertEqual([process.exitcode for process in processes], [0, 0])
-        _, limits, _ = child_time.load_config(self.config)
-        self.assertEqual(limits["hudzaifah"], 7800)
-
-    def test_write_failure_is_reported_and_original_is_preserved(self):
-        with mock.patch.object(child_time.os, "replace", side_effect=OSError("full")):
-            with self.assertRaisesRegex(child_time.ChildTimeError, "Cannot update"):
-                child_time.atomic_update_limit("hudzaifah", 8700, path=self.config)
-        self.assertIn("hudzaifah=7200", self.config.read_text())
-        leftovers = [
-            path for path in self.root.glob(self.config.name + ".*")
-            if path.name != self.config.name + ".lock"
-        ]
-        self.assertEqual(leftovers, [])
-
-    def test_mutation_oserror_is_not_reported_as_lock_failure(self):
-        with mock.patch.object(
-            child_time, "_atomic_update_limit_locked", side_effect=OSError("body")
-        ):
-            with self.assertRaisesRegex(OSError, "body"):
-                child_time.atomic_update_limit("hudzaifah", 8700, path=self.config)
-
-    def test_until_uses_current_usage_inside_mutation(self):
-        now = datetime(2026, 9, 4, 9, 0, tzinfo=timezone.utc)
-        with mock.patch.object(child_time, "CONFIG", self.config), \
-             mock.patch.object(child_time, "validate_username"), \
-             mock.patch.object(child_time, "local_now", return_value=now), \
-             mock.patch.object(child_time, "read_used", return_value=1800), \
-             redirect_stdout(StringIO()):
-            child_time.command_until(Namespace(username="hudzaifah", clock="10:00"))
-        _, limits, _ = child_time.load_config(self.config)
-        self.assertEqual(limits["hudzaifah"], 5400)
+    def test_forced_reduction_preserves_used_and_zeroes_remaining(self):
+        (self.state_dir / "hudzaifah.state").write_text(f"{child_time.today()} 5400\n")
+        rc, out, _ = self._run(["set", "hudzaifah", "1h", "--force"])
+        self.assertEqual(rc, 0)
+        self.assertIn("Used today : 01:30:00", out)
+        self.assertIn("Remaining  : 00:00:00", out)
 
 
-class ReductionGuardTests(unittest.TestCase):
-    def test_reduction_below_used_requires_force(self):
-        with self.assertRaises(child_time.ChildTimeError):
-            child_time.confirm_reduction(
-                "child", used=4000, old_limit=7200, new_limit=3600, force=False
-            )
+class ImportPrecedenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.addCleanup(self.tempdir.cleanup)
 
-    def test_force_allows_reduction_below_used(self):
-        child_time.confirm_reduction(
-            "child", used=4000, old_limit=7200, new_limit=3600, force=True
-        )
+    def test_source_tree_sibling_wins_over_stale_installed_core(self):
+        sibling = self.root / "sibling_core.py"
+        installed = self.root / "installed_core.py"
+        _write_fake_core(sibling, "sibling")
+        _write_fake_core(installed, "installed")
 
+        with mock.patch.object(child_time, "_SIBLING_CORE", sibling), \
+             mock.patch.object(child_time, "_INSTALLED_CORE", installed):
+            module = child_time._load_core()
 
-class UsernameTests(unittest.TestCase):
-    def test_invalid_username_rejected(self):
-        with self.assertRaises(child_time.ChildTimeError):
-            child_time.validate_username("../root", require_local=False)
+        self.assertEqual(module.MARKER, "sibling")
 
-    def test_valid_username_format(self):
-        child_time.validate_username("child_1", require_local=False)
+    def test_installed_layout_fallback_resolves_product_owned_core(self):
+        sibling = self.root / "no_sibling_here.py"
+        installed = self.root / "installed_core.py"
+        _write_fake_core(installed, "installed")
 
-class StatusRowsTests(unittest.TestCase):
-    def test_status_preserves_usage_above_forced_lower_limit(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            config = root / "child-time-limit.conf"
-            state_dir = root / "state"
-            state_dir.mkdir()
+        with mock.patch.object(child_time, "_SIBLING_CORE", sibling), \
+             mock.patch.object(child_time, "_INSTALLED_CORE", installed):
+            module = child_time._load_core()
 
-            config.write_text("child=3600\n")
-            (state_dir / "child.state").write_text(
-                f"{child_time.today()} 5400\n"
-            )
+        self.assertEqual(module.MARKER, "installed")
 
-            with mock.patch.object(child_time, "CONFIG", config), \
-                 mock.patch.object(child_time, "STATE_DIR", state_dir):
-                rows = child_time.status_rows()
+    def test_missing_core_raises_import_error(self):
+        sibling = self.root / "no_sibling_here.py"
+        installed = self.root / "no_installed_here.py"
 
-            self.assertEqual(rows[0][0], "child")
-            self.assertEqual(rows[0][1], 5400)
-            self.assertEqual(rows[0][2], 0)
-            self.assertEqual(rows[0][3], 3600)
-            self.assertEqual(rows[0][4], "EXHAUSTED")
-
-    def test_runtime_default_state_dir_is_patchable_and_stale_state_is_zero(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            state_dir = Path(tempdir)
-            (state_dir / "child.state").write_text("2000-01-01 9999\n")
-            with mock.patch.object(child_time, "STATE_DIR", state_dir):
-                self.assertEqual(child_time.read_used("child"), 0)
-
-    def test_missing_state_is_zero(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            with mock.patch.object(child_time, "STATE_DIR", Path(tempdir)):
-                self.assertEqual(child_time.read_used("child"), 0)
+        with mock.patch.object(child_time, "_SIBLING_CORE", sibling), \
+             mock.patch.object(child_time, "_INSTALLED_CORE", installed):
+            with self.assertRaises(ImportError):
+                child_time._load_core()
 
 
-class InstallerUpgradeTests(unittest.TestCase):
+class InstallerTests(unittest.TestCase):
+    def setUp(self):
+        self.installer = (ROOT / "install.sh").read_text()
+
     def test_installer_explicitly_restarts_enforcer_after_upgrade(self):
-        installer = (ROOT / "install.sh").read_text()
-
         enable = "systemctl enable child-time-enforcer.service"
         restart = "systemctl restart child-time-enforcer.service"
         old_enable_now = "systemctl enable --now child-time-enforcer.service"
 
-        self.assertIn(enable, installer)
-        self.assertIn(restart, installer)
-        self.assertNotIn(old_enable_now, installer)
+        self.assertIn(enable, self.installer)
+        self.assertIn(restart, self.installer)
+        self.assertNotIn(old_enable_now, self.installer)
 
         artifact_install = (
             'install -m 0755 "$ROOT_DIR/src/child-time-enforcer" '
@@ -310,8 +229,56 @@ class InstallerUpgradeTests(unittest.TestCase):
         )
         daemon_reload = "systemctl daemon-reload"
 
-        self.assertLess(installer.index(artifact_install), installer.index(daemon_reload))
-        self.assertLess(installer.index(daemon_reload), installer.index(restart))
+        self.assertLess(
+            self.installer.index(artifact_install), self.installer.index(daemon_reload)
+        )
+        self.assertLess(
+            self.installer.index(daemon_reload), self.installer.index(restart)
+        )
+
+    def test_installer_creates_product_owned_lib_directory(self):
+        self.assertIn("install -d -m 0755 /usr/local/lib/child-time-limit", self.installer)
+
+    def test_installer_installs_core_module_with_expected_mode(self):
+        core_install = (
+            'install -m 0644 "$ROOT_DIR/src/child_time_core.py" '
+            '/usr/local/lib/child-time-limit/child_time_core.py'
+        )
+        self.assertIn(core_install, self.installer)
+
+    def test_installer_installs_core_before_cli(self):
+        core_install = "/usr/local/lib/child-time-limit/child_time_core.py"
+        cli_install = (
+            'install -m 0755 "$ROOT_DIR/src/child-time" /usr/local/sbin/child-time'
+        )
+        self.assertLess(
+            self.installer.index(core_install), self.installer.index(cli_install)
+        )
+
+    def test_installer_does_not_use_dist_packages(self):
+        self.assertNotIn("dist-packages", self.installer)
+
+
+class UninstallerTests(unittest.TestCase):
+    def setUp(self):
+        self.uninstaller = (ROOT / "uninstall.sh").read_text()
+
+    def test_uninstaller_removes_core_module_and_pycache(self):
+        self.assertIn(
+            "rm -f /usr/local/lib/child-time-limit/child_time_core.py", self.uninstaller
+        )
+        self.assertIn("__pycache__", self.uninstaller)
+        self.assertIn("child_time_core", self.uninstaller)
+
+    def test_uninstaller_removes_lib_dir_only_if_empty(self):
+        self.assertIn("rmdir", self.uninstaller)
+        self.assertIn("/usr/local/lib/child-time-limit", self.uninstaller)
+
+    def test_uninstaller_preserves_config_and_state(self):
+        self.assertIn("/etc/child-time-limit.conf", self.uninstaller)
+        self.assertIn("/var/lib/child-time-limit/", self.uninstaller)
+        self.assertNotIn("rm -f /etc/child-time-limit.conf", self.uninstaller)
+        self.assertNotIn("rm -rf /var/lib/child-time-limit", self.uninstaller)
 
 
 class LegacyStatusTests(unittest.TestCase):
@@ -360,6 +327,7 @@ class LegacyStatusTests(unittest.TestCase):
             self.assertEqual(fields[2], "00:00:00")
             self.assertEqual(fields[3], "01:00:00")
             self.assertEqual(fields[4], "EXHAUSTED")
+
 
 if __name__ == "__main__":
     unittest.main()
