@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?> <!--*-nxml-*-->
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+        "https://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+
+<!--
+  SSOT_CONFIRMATION_PENDING (not yet ratified against project SSOT):
+  both actions currently require interactive administrator authentication,
+  matching the existing accepted CLI exactly: `child-time status` also
+  calls require_root() today, so an unauthenticated `status` action here
+  would have been a NEW, looser capability relative to what is already
+  production-accepted, not merely a convenience. Conservative choice:
+  keep both actions at parity with existing behavior until SSOT (09 —
+  UI/UX Requirements) confirms whether a future read-only, non-admin
+  "child can check their own remaining time" surface is actually wanted.
+  Loosening `status` later is a product/UX decision, not a security fix,
+  so it is deferred rather than guessed here.
+-->
+
+<policyconfig>
+
+	<vendor>OFLIT</vendor>
+	<vendor_url>https://github.com/andrestr02/oflit-child-time-limit</vendor_url>
+
+	<action id="id.oflit.ChildTime1.status">
+		<description>View OFLIT Child Time Limit status</description>
+		<message>Authentication is required to view child time-limit status.</message>
+		<defaults>
+			<allow_any>no</allow_any>
+			<allow_inactive>no</allow_inactive>
+			<allow_active>auth_admin_keep</allow_active>
+		</defaults>
+	</action>
+
+	<action id="id.oflit.ChildTime1.manage">
+		<description>Change OFLIT Child Time Limit policy</description>
+		<message>Authentication is required to change a child's daily time limit.</message>
+		<defaults>
+			<allow_any>no</allow_any>
+			<allow_inactive>no</allow_inactive>
+			<allow_active>auth_admin_keep</allow_active>
+		</defaults>
+	</action>
+
+</policyconfig>

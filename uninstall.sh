@@ -12,8 +12,17 @@ PAM_RULE="account required pam_exec.so quiet /usr/local/sbin/child-time-login-ch
 
 systemctl disable --now child-time-enforcer.service 2>/dev/null || true
 rm -f /etc/systemd/system/child-time-enforcer.service
+
+systemctl disable --now child-time-backend.service 2>/dev/null || true
+rm -f /etc/systemd/system/child-time-backend.service
+rm -f /usr/share/dbus-1/system-services/id.oflit.ChildTime1.service
+rm -f /usr/share/dbus-1/system.d/id.oflit.ChildTime1.conf
+rm -f /usr/share/polkit-1/actions/id.oflit.ChildTime1.policy
+systemctl reload dbus.service 2>/dev/null || true
+
 systemctl daemon-reload
 systemctl reset-failed child-time-enforcer.service 2>/dev/null || true
+systemctl reset-failed child-time-backend.service 2>/dev/null || true
 
 if [[ -f "$PAM_FILE" ]]; then
   python3 - "$PAM_FILE" "$PAM_MARKER" "$PAM_RULE" <<'PY'
@@ -33,9 +42,16 @@ rm -f /usr/local/sbin/child-time-enforcer
 rm -f /usr/local/sbin/child-time-login-check
 rm -f /usr/local/sbin/child-time-status
 rm -f /usr/local/sbin/child-time
+rm -f /usr/local/sbin/child-time-backend
 
 rm -f /usr/local/lib/child-time-limit/child_time_core.py
+rm -f /usr/local/lib/child-time-limit/child_time_operations.py
+rm -f /usr/local/lib/child-time-limit/child_time_backend.py
+rm -f /usr/local/lib/child-time-limit/child_time_polkit.py
 rm -f /usr/local/lib/child-time-limit/__pycache__/child_time_core*.pyc
+rm -f /usr/local/lib/child-time-limit/__pycache__/child_time_operations*.pyc
+rm -f /usr/local/lib/child-time-limit/__pycache__/child_time_backend*.pyc
+rm -f /usr/local/lib/child-time-limit/__pycache__/child_time_polkit*.pyc
 rmdir --ignore-fail-on-non-empty /usr/local/lib/child-time-limit/__pycache__ 2>/dev/null || true
 rmdir --ignore-fail-on-non-empty /usr/local/lib/child-time-limit 2>/dev/null || true
 

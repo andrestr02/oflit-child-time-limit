@@ -1,0 +1,174 @@
+#!/usr/bin/python3
+
+"""Privileged D-Bus backend for OFLIT Child Time Limit.
+
+This is a thin transport layer: it authenticates every call via Polkit
+(child_time_polkit) and then delegates to child_time_backend.
+ChildTimeBackend, which in turn delegates to the accepted reusable
+management core (child_time_core). No policy/domain logic lives here --
+every domain failure is a child_time_backend.BackendError, mapped below
+to a stable `id.oflit.ChildTime1.Error.*` D-Bus error name.
+
+Runs as root under systemd (Type=dbus, BusName=id.oflit.ChildTime1),
+bus-activatable via the matching /usr/share/dbus-1/system-services unit.
+"""
+
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+
+import dbus
+import dbus.exceptions
+import dbus.mainloop.glib
+import dbus.service
+from gi.repository import GLib
+
+_SCRIPT_PATH = Path(__file__).resolve()
+_LIB_DIR_CANDIDATES = (
+    _SCRIPT_PATH.parent,
+    Path("/usr/local/lib/child-time-limit"),
+)
+
+
+def _load(filename, module_name):
+    """Resolve a project module with the same source-tree-wins-over-
+    installed precedence used throughout this project's entry points."""
+    for directory in _LIB_DIR_CANDIDATES:
+        candidate = directory / filename
+        if candidate.is_file():
+            loader = importlib.machinery.SourceFileLoader(module_name, str(candidate))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            if spec is None:
+                raise RuntimeError(f"Cannot create import spec for {candidate}")
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+            return module
+    raise ImportError(
+        f"Cannot locate {filename} in any of: "
+        + ", ".join(str(d) for d in _LIB_DIR_CANDIDATES)
+    )
+
+
+backend_module = _load("child_time_backend.py", "child_time_backend")
+polkit_module = _load("child_time_polkit.py", "child_time_polkit")
+
+ChildTimeBackend = backend_module.ChildTimeBackend
+PolkitAuthority = polkit_module.PolkitAuthority
+
+BUS_NAME = "id.oflit.ChildTime1"
+OBJECT_PATH = "/id/oflit/ChildTime1"
+INTERFACE = "id.oflit.ChildTime1"
+
+ACTION_STATUS = "id.oflit.ChildTime1.status"
+ACTION_MANAGE = "id.oflit.ChildTime1.manage"
+
+_ERROR_CODE_TO_NAME = {
+    "unknown-user": "UnknownUser",
+    "invalid-duration": "InvalidDuration",
+    "invalid-limit": "InvalidLimit",
+    "reduction-requires-force": "ReductionRequiresForce",
+    "authorization-denied": "AuthorizationDenied",
+    "malformed-request": "MalformedRequest",
+    "internal-error": "InternalError",
+}
+
+
+def _dbus_error_for(backend_error):
+    name = _ERROR_CODE_TO_NAME.get(backend_error.code, "InternalError")
+    exc_type = type(
+        f"ChildTime{name}Error",
+        (dbus.exceptions.DBusException,),
+        {"_dbus_error_name": f"{INTERFACE}.Error.{name}"},
+    )
+    return exc_type(str(backend_error))
+
+
+class ChildTimeService(dbus.service.Object):
+    def __init__(self, bus, backend=None, authority=None):
+        super().__init__(bus, OBJECT_PATH)
+        self._backend = backend if backend is not None else ChildTimeBackend()
+        self._authority = authority if authority is not None else PolkitAuthority.system()
+
+    def _authorize(self, sender, action_id):
+        if not sender:
+            raise _dbus_error_for(
+                backend_module.MalformedRequestError("caller identity unavailable")
+            )
+        if not self._authority.check_authorization(sender, action_id):
+            raise _dbus_error_for(
+                backend_module.AuthorizationDeniedError(
+                    f"Authorization denied for {action_id}"
+                )
+            )
+
+    def _mutate(self, fn, *args, **kwargs):
+        try:
+            result = fn(*args, **kwargs)
+        except backend_module.BackendError as exc:
+            raise _dbus_error_for(exc) from exc
+        return (
+            result.username,
+            result.used,
+            result.old_limit,
+            result.new_limit,
+            result.remaining,
+            result.reason or "",
+        )
+
+    @dbus.service.method(
+        INTERFACE, in_signature="s", out_signature="a(sxxxs)", sender_keyword="sender"
+    )
+    def Status(self, username, sender=None):
+        self._authorize(sender, ACTION_STATUS)
+        try:
+            rows = self._backend.status(username or None)
+        except backend_module.BackendError as exc:
+            raise _dbus_error_for(exc) from exc
+        return [
+            (row.username, row.used, row.remaining, row.limit, row.status)
+            for row in rows
+        ]
+
+    @dbus.service.method(
+        INTERFACE, in_signature="ssb", out_signature="(sxxxxs)", sender_keyword="sender"
+    )
+    def SetLimit(self, username, duration, force, sender=None):
+        self._authorize(sender, ACTION_MANAGE)
+        return self._mutate(self._backend.set_limit, username, duration, force=bool(force))
+
+    @dbus.service.method(
+        INTERFACE, in_signature="ss", out_signature="(sxxxxs)", sender_keyword="sender"
+    )
+    def AddLimit(self, username, duration, sender=None):
+        self._authorize(sender, ACTION_MANAGE)
+        return self._mutate(self._backend.add_limit, username, duration)
+
+    @dbus.service.method(
+        INTERFACE, in_signature="ssb", out_signature="(sxxxxs)", sender_keyword="sender"
+    )
+    def SubtractLimit(self, username, duration, force, sender=None):
+        self._authorize(sender, ACTION_MANAGE)
+        return self._mutate(
+            self._backend.subtract_limit, username, duration, force=bool(force)
+        )
+
+    @dbus.service.method(
+        INTERFACE, in_signature="ss", out_signature="(sxxxxs)", sender_keyword="sender"
+    )
+    def Until(self, username, clock, sender=None):
+        self._authorize(sender, ACTION_MANAGE)
+        return self._mutate(self._backend.until, username, clock)
+
+
+def main():
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    dbus.service.BusName(BUS_NAME, bus)
+    ChildTimeService(bus)
+    GLib.MainLoop().run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

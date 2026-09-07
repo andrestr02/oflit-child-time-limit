@@ -2,6 +2,51 @@
 
 All notable changes to OFLIT Child Time Limit will be documented in this file.
 
+## [Unreleased]
+
+Phase 2A: privileged D-Bus administration backend (code gate only; not yet
+production-deployed or production-accepted).
+
+### Added
+
+- `child_time_operations.py`: shared per-command (`set`/`add`/`subtract`/`until`)
+  policy-calculation helpers, factored out for reuse by any future
+  privileged front end.
+- `child_time_backend.py`: transport-agnostic administration API wrapping
+  the reusable core. Never accepts a caller-controlled config/state path.
+  Classifies domain failures into a small, stable exception vocabulary.
+- `child_time_polkit.py`: Polkit (`org.freedesktop.PolicyKit1`)
+  authorization wrapper. Fails closed on any error or missing caller
+  identity.
+- `child-time-backend`: D-Bus system-bus service (`id.oflit.ChildTime1`),
+  bus-activated on demand. Exposes `Status`, `SetLimit`, `AddLimit`,
+  `SubtractLimit`, and `Until` with structured arguments/results and
+  stable `id.oflit.ChildTime1.Error.*` error names.
+- D-Bus bus policy, D-Bus service-activation file, Polkit action
+  definitions, and a `Type=dbus` systemd unit for the new backend.
+- Installer/uninstaller support for all of the above; upgrade-safe and
+  idempotent, matching the existing installer's config/state preservation
+  guarantees. The backend service is intentionally not enabled or started
+  eagerly (bus-activated only).
+
+### Tests
+
+- 61 new automated tests: shared-operations unit tests, backend unit
+  tests (including a hygiene check that no method accepts a config/state
+  path), Polkit-wrapper unit tests (fail-closed paths), a real D-Bus
+  integration suite (private throwaway bus, injected fake Polkit
+  authority), and static installer/uninstaller packaging checks.
+- All existing tests continue to pass unmodified (120/120 total).
+
+### Notes
+
+- The `child-time` CLI is unchanged and does not depend on the new
+  backend; both share `child_time_core.py`/`child_time_operations.py`
+  without either depending on the other.
+- Polkit authorization granularity (`status` open to any active session,
+  `manage` requiring interactive admin authentication) is a reasoned
+  default pending confirmation against the project's SSOT.
+
 ## [1.1.1] - 2026-09-05
 
 Maintenance patch following the v1.1.0 production release.

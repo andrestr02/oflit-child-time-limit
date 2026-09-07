@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=id.oflit.ChildTime1
+Exec=/usr/local/sbin/child-time-backend
+User=root
+SystemdService=child-time-backend.service

@@ -36,12 +36,24 @@ cp -a "$PAM_FILE" "$BACKUP_DIR/common-account.$STAMP"
 
 install -d -m 0755 /usr/local/lib/child-time-limit
 install -m 0644 "$ROOT_DIR/src/child_time_core.py" /usr/local/lib/child-time-limit/child_time_core.py
+install -m 0644 "$ROOT_DIR/src/child_time_operations.py" /usr/local/lib/child-time-limit/child_time_operations.py
+install -m 0644 "$ROOT_DIR/src/child_time_backend.py" /usr/local/lib/child-time-limit/child_time_backend.py
+install -m 0644 "$ROOT_DIR/src/child_time_polkit.py" /usr/local/lib/child-time-limit/child_time_polkit.py
 
 install -m 0755 "$ROOT_DIR/src/child-time-enforcer" /usr/local/sbin/child-time-enforcer
 install -m 0755 "$ROOT_DIR/src/child-time-login-check" /usr/local/sbin/child-time-login-check
 install -m 0755 "$ROOT_DIR/src/child-time-status" /usr/local/sbin/child-time-status
 install -m 0755 "$ROOT_DIR/src/child-time" /usr/local/sbin/child-time
+install -m 0755 "$ROOT_DIR/src/child-time-backend" /usr/local/sbin/child-time-backend
 install -m 0644 "$ROOT_DIR/systemd/child-time-enforcer.service" /etc/systemd/system/child-time-enforcer.service
+install -m 0644 "$ROOT_DIR/systemd/child-time-backend.service" /etc/systemd/system/child-time-backend.service
+
+install -d -m 0755 /usr/share/dbus-1/system.d
+install -m 0644 "$ROOT_DIR/dbus/id.oflit.ChildTime1.conf" /usr/share/dbus-1/system.d/id.oflit.ChildTime1.conf
+install -d -m 0755 /usr/share/dbus-1/system-services
+install -m 0644 "$ROOT_DIR/dbus/id.oflit.ChildTime1.service" /usr/share/dbus-1/system-services/id.oflit.ChildTime1.service
+install -d -m 0755 /usr/share/polkit-1/actions
+install -m 0644 "$ROOT_DIR/polkit/id.oflit.ChildTime1.policy" /usr/share/polkit-1/actions/id.oflit.ChildTime1.policy
 
 if [[ ! -e /etc/child-time-limit.conf ]]; then
   install -m 0600 "$ROOT_DIR/config/child-time-limit.conf.example" /etc/child-time-limit.conf
@@ -68,6 +80,16 @@ if ! systemctl is-active --quiet child-time-enforcer.service; then
   exit 1
 fi
 
+# child-time-backend.service is D-Bus bus-activated (see
+# /usr/share/dbus-1/system-services/id.oflit.ChildTime1.service); it is
+# intentionally NOT enabled or started here. The system D-Bus daemon
+# starts it on first call to id.oflit.ChildTime1 and it exits when idle.
+# Reloading dbus/polkit lets an already-running daemon pick up the new
+# bus policy and action definitions without waiting for its own file
+# watch; failure to reload is non-fatal since both daemons also detect
+# these files on their own.
+systemctl reload dbus.service 2>/dev/null || true
+
 cat <<'EOF'
 
 OFLIT Child Time Limit installed.
@@ -87,4 +109,9 @@ compatibility.
 
 If another parental-control time daemon is installed, disable its time-enforcement
 path before treating OFLIT Child Time Limit as the source of truth.
+
+A privileged D-Bus administration backend (id.oflit.ChildTime1) is now
+installed alongside the CLI, for future GUI/remote-management front ends.
+It is D-Bus-activated on demand and idle otherwise; it is not required for
+the CLI, which continues to work exactly as before.
 EOF

@@ -78,3 +78,70 @@ The daemon answers: "Should this currently running session be terminated?"
 PAM answers: "Should this user be allowed to start another login after quota exhaustion?"
 
 Using both prevents a simple logout/login or reboot workflow from restoring same-day access.
+
+## Administration layer
+
+Policy administration (viewing status, changing a daily limit) is a third,
+separate concern from the two enforcement layers above. It shares one
+reusable management core (`child_time_core.py`) with two front ends:
+
+```text
+CLI ("child-time")                D-Bus backend ("child-time-backend")
+        \                                  /
+         \                                /
+          v                              v
+        child_time_operations.py (per-command calculation)
+                        |
+                        v
+              child_time_core.py (transaction/lock/policy invariant)
+                        |
+                        v
+           /etc/child-time-limit.conf
+```
+
+`child_time_core.py` is deliberately kept free of D-Bus, Polkit, argparse,
+and subprocess code (enforced by a static test), so it can never depend on
+which front end is calling it.
+
+The D-Bus backend (`id.oflit.ChildTime1`, installed as
+`/usr/local/sbin/child-time-backend`) is a thin, bus-activated transport
+layer:
+
+- `child_time_backend.py` -- transport-agnostic administration API. Never
+  accepts a caller-supplied config/state path, so a caller can never
+  redirect a privileged operation at an arbitrary file. Classifies domain
+  failures into a small set of exceptions (`UnknownUserError`,
+  `InvalidDurationError`, `InvalidLimitError`,
+  `ReductionRequiresForceError`, ...).
+- `child_time_polkit.py` -- the only module that talks to Polkit
+  (`org.freedesktop.PolicyKit1`). Fails closed on any error, missing
+  caller identity, or unexpected reply shape.
+- `src/child-time-backend` -- the D-Bus service object itself. Every
+  method first calls Polkit (`id.oflit.ChildTime1.status` for reads,
+  `id.oflit.ChildTime1.manage` for mutations) using the caller's real
+  D-Bus unique name, then delegates to `child_time_backend`, then maps
+  any domain failure to a stable `id.oflit.ChildTime1.Error.*` name.
+
+The CLI does not call the D-Bus backend, and the backend does not shell
+out to the CLI; both are independent front ends over the same core so
+neither can drift from the other's transaction semantics.
+
+The backend is registered for D-Bus bus activation
+(`/usr/share/dbus-1/system-services/id.oflit.ChildTime1.service` +
+`systemd/child-time-backend.service`, `Type=dbus`) rather than started
+unconditionally at boot: the system D-Bus daemon starts it on first call
+and it is otherwise idle. Its D-Bus bus policy
+(`/usr/share/dbus-1/system.d/id.oflit.ChildTime1.conf`) only lets `root`
+own the name; any local user may attempt a call, but Polkit is the actual
+authorization boundary for every method.
+
+**SSOT_CONFIRMATION_PENDING:** the Polkit action defaults in
+`polkit/id.oflit.ChildTime1.policy` currently require interactive
+administrator authentication for *both* `status` and `manage`, at parity
+with the existing accepted CLI (`child-time status` also calls
+`require_root()`). An unauthenticated `status` action would have been a
+new, looser capability relative to what is already production-accepted,
+not merely a convenience default, so the conservative (parity) choice was
+made rather than guessed. Whether a future read-only, non-admin "child
+checks their own remaining time" surface should exist is a product/UX
+decision deferred to SSOT (09 — UI/UX Requirements), not implemented here.
