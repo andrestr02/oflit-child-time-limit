@@ -33,6 +33,8 @@ rm -f /usr/local/sbin/child-time-enforcer
 rm -f /usr/local/sbin/child-time-login-check
 rm -f /usr/local/sbin/child-time-status
 rm -f /usr/local/sbin/child-time
+rm -f /usr/local/lib/child-time-limit/child_time_core.py
+rmdir /usr/local/lib/child-time-limit 2>/dev/null || true
 
 cat <<'EOF'
 OFLIT Child Time Limit has been disabled and its PAM rule removed.

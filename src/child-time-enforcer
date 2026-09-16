@@ -11,6 +11,15 @@ STATE_DIR = "/var/lib/child-time-limit"
 LOCK_FILE = "/run/child-time-limit.lock"
 POLL_SECONDS = 1.0
 
+ACCESS_START = (9, 0)
+ACCESS_END = (17, 0)
+
+
+def within_access_window(now):
+    current = (now.hour, now.minute)
+    return ACCESS_START <= current < ACCESS_END
+
+
 os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
 
 # Only one enforcer instance may run at a time.
@@ -176,6 +185,11 @@ while True:
         write_state(username, day, used)
 
         if used >= limit:
+            terminate(username)
+
+    wall_now = datetime.now().astimezone()
+    if not within_access_window(wall_now):
+        for username in current_active:
             terminate(username)
 
     previous_active = current_active

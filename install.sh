@@ -32,8 +32,10 @@ fi
 
 install -d -m 0700 /var/lib/child-time-limit
 install -d -m 0700 "$BACKUP_DIR"
+install -d -m 0755 /usr/local/lib/child-time-limit
 cp -a "$PAM_FILE" "$BACKUP_DIR/common-account.$STAMP"
 
+install -m 0644 "$ROOT_DIR/src/child_time_core.py" /usr/local/lib/child-time-limit/child_time_core.py
 install -m 0755 "$ROOT_DIR/src/child-time-enforcer" /usr/local/sbin/child-time-enforcer
 install -m 0755 "$ROOT_DIR/src/child-time-login-check" /usr/local/sbin/child-time-login-check
 install -m 0755 "$ROOT_DIR/src/child-time-status" /usr/local/sbin/child-time-status

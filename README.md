@@ -16,7 +16,48 @@ The project was created after testing desktop parental-control approaches that c
 - Includes `child-time-status` for a simple daily usage summary.
 - Includes `child-time` for human-friendly policy administration without manually calculating seconds.
 
+## Access window
+
+Configured child accounts are subject to two independent limits:
+
+1. a cumulative daily active-use quota; and
+2. a global local-time access window from **09:00 inclusive to 17:00 exclusive**.
+
+A child may consume the configured daily quota at any time inside that
+window. Unused quota does not permit access after 17:00.
+
+At or after 17:00, an active configured graphical session is terminated
+even when daily quota remains. Before 09:00, PAM rejects login for
+configured child accounts.
+
+The access window applies only to usernames present in
+`/etc/child-time-limit.conf`. Unconfigured users retain the existing
+fail-open behavior.
+
+The access window is currently a fixed global runtime policy. The
+configuration file continues to contain only daily quotas in the form
+`username=seconds-per-day`.
+
 ## Architecture
+
+The administrator CLI is split into two layers:
+
+- `src/child-time` provides command-line parsing and presentation.
+- `src/child_time_core.py` provides shared policy operations including
+  configuration parsing, state reads, locking, atomic policy updates,
+  reduction guards, and status calculation.
+
+When installed, the shared policy core is stored at
+`/usr/local/lib/child-time-limit/child_time_core.py`.
+
+Runtime enforcement remains separate:
+
+- `child-time-enforcer` accounts active graphical usage, enforces quota
+  exhaustion, and terminates configured graphical sessions outside the
+  access window.
+- `child-time-login-check` provides the PAM account gate for
+  access-window and quota enforcement.
+
 
 ```text
 GNOME / graphical session

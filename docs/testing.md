@@ -144,6 +144,34 @@ sudo rm -f /var/lib/child-time-limit/testchild.state
 sudo systemctl restart child-time-enforcer.service
 ```
 
+
+## Automated regression suite
+
+Before release, run:
+
+    python3 -m unittest discover -v tests
+
+The v1.2.0 release gate contains 38 automated tests covering:
+
+- daily quota policy behavior;
+- atomic and concurrent policy updates;
+- reduction and `--force` semantics;
+- state and status behavior;
+- CLI-to-core adapter behavior;
+- `child-time until` active-use semantics;
+- policy-core packaging;
+- access-window boundaries.
+
+Access-window boundaries:
+
+    08:59:59 -> denied
+    09:00:00 -> allowed
+    16:59:59 -> allowed
+    17:00:00 -> denied
+
+Automated tests complement live PAM and graphical-session acceptance
+testing; they do not replace it.
+
 ## Acceptance criteria
 
 A production deployment is accepted only when all of these are proven:

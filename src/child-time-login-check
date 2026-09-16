@@ -7,6 +7,15 @@ from datetime import datetime
 CONFIG = "/etc/child-time-limit.conf"
 STATE_DIR = "/var/lib/child-time-limit"
 
+ACCESS_START = (9, 0)
+ACCESS_END = (17, 0)
+
+
+def within_access_window(now):
+    current = (now.hour, now.minute)
+    return ACCESS_START <= current < ACCESS_END
+
+
 username = os.environ.get("PAM_USER", "")
 
 limits = {}
@@ -28,7 +37,13 @@ except Exception:
 if username not in limits:
     sys.exit(0)
 
-today = datetime.now().astimezone().date().isoformat()
+now = datetime.now().astimezone()
+
+if not within_access_window(now):
+    print("Computer access is allowed only between 09:00 and 17:00.")
+    sys.exit(1)
+
+today = now.date().isoformat()
 path = os.path.join(STATE_DIR, username + ".state")
 used = 0
 

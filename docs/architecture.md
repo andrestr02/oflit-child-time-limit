@@ -54,6 +54,48 @@ The monotonic clock is only used to measure elapsed time within one running daem
 
 At most a sub-second fraction can be lost when the daemon restarts. A login/logout transition can differ by at most one polling interval.
 
+
+## Access window
+
+The access window is independent from the daily active-use quota.
+
+Global contract:
+
+    09:00 <= local time < 17:00
+
+It applies to every username configured in
+`/etc/child-time-limit.conf`.
+
+### Login path
+
+PAM preserves this ordering:
+
+    unconfigured user -> fail open
+    configured child -> access window -> daily quota
+
+### Active-session path
+
+The enforcer preserves this ordering:
+
+    charge -> cache -> persist -> quota
+           -> access window -> previous_active
+
+Elapsed active use is therefore persisted before access-window
+termination.
+
+The access window does not change `child-time until`; it remains an
+active-use allowance.
+
+## Policy core and CLI adapter
+
+Administrator policy logic lives in `src/child_time_core.py`.
+
+`src/child-time` is the CLI adapter. The installed core is:
+
+    /usr/local/lib/child-time-limit/child_time_core.py
+
+Runtime PAM and graphical-session enforcement remain separate.
+
 ## Threat model
 
 This project assumes child accounts:
