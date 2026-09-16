@@ -2,6 +2,66 @@
 
 All notable changes to OFLIT Child Time Limit will be documented in this file.
 
+## [1.3.0] - 2026-09-17
+
+Configurable access window release.
+
+### Added
+
+- `sudo child-time window` shows the current global access window.
+- `sudo child-time window START END` (24-hour `HH:MM`) sets a new window.
+- Separate access-window configuration file, `/etc/child-time-access.conf`
+  (`start=HH:MM` / `end=HH:MM`), independent from the existing
+  `/etc/child-time-limit.conf` quota format.
+- `config/child-time-access.conf.example`, installed as the default
+  `09:00`-`17:00` window on a fresh install.
+- Regression coverage for CLI window get/set, concurrent atomic
+  access-window updates, and access-window clock parsing.
+
+### Changed
+
+- Both the PAM login gate and the active-session enforcer now read the
+  configured access window from `/etc/child-time-access.conf` at each
+  check, falling back to the v1.2.0 default `09:00`-`17:00` when the
+  file is missing or fails to parse. No second daemon or timer was
+  introduced; hot reload continues to require no service restart.
+
+### Fixed
+
+- `child-time-enforcer` and `child-time-login-check` were missing the
+  `pathlib` import their access-window parsing relied on, which would
+  have raised `NameError` at process start -- crashing the enforcer
+  daemon and failing every PAM login check. Both scripts now import
+  `Path` correctly.
+- Access-window clock parsing no longer reuses `child-time until`'s
+  "must be later than now" rule. An access window is a recurring daily
+  policy, so setting `start=08:00` after 08:00 has already passed today
+  (for example, at noon) is valid and no longer rejected.
+- `atomic_update_access_window` no longer writes through a single fixed
+  temporary filename with no locking, which could let concurrent
+  `child-time window` invocations race, corrupt, or fail to write the
+  config. It now uses a uniquely-named temporary file plus the same
+  exclusive-lock/atomic-replace/fsync strategy as daily-quota updates.
+- The shipped `config/child-time-access.conf.example` and `VERSION`
+  contained a literal backslash-`n` sequence instead of real newlines;
+  both now contain actual line breaks.
+
+### Preserved behavior
+
+- Same-day windows only: `start` must be strictly earlier than `end`;
+  overnight windows are intentionally unsupported.
+- Daily active-use quota semantics, `/etc/child-time-limit.conf` format,
+  local-date reset, state persistence, multi-session deduplication,
+  quota exhaustion termination, PAM re-login denial, fail-open behavior
+  for unconfigured/admin users, atomic quota updates and locking, and
+  the legacy `child-time-status` command are all unchanged.
+- `child-time until` continues to mean remaining active-use quota, not
+  wall-clock access-window expiry.
+- Installer/uninstaller safety: a fresh install creates the default
+  access config; an upgrade preserves an administrator's existing
+  `/etc/child-time-access.conf` and only re-applies its `0600`
+  permissions.
+
 ## [1.2.0] - 2026-09-17
 
 Access-window and policy-core release.

@@ -151,7 +151,7 @@ Before release, run:
 
     python3 -m unittest discover -v tests
 
-The v1.2.0 release gate contains 38 automated tests covering:
+The v1.3.0 release gate contains 52 automated tests covering:
 
 - daily quota policy behavior;
 - atomic and concurrent policy updates;
@@ -160,14 +160,20 @@ The v1.2.0 release gate contains 38 automated tests covering:
 - CLI-to-core adapter behavior;
 - `child-time until` active-use semantics;
 - policy-core packaging;
-- access-window boundaries.
+- access-window boundaries, including a configurable window;
+- concurrent, lock-protected access-window updates;
+- access-window clock parsing independent of "future today" semantics.
 
-Access-window boundaries:
+Default access-window boundaries (`09:00`-`17:00`):
 
     08:59:59 -> denied
     09:00:00 -> allowed
     16:59:59 -> allowed
     17:00:00 -> denied
+
+A configured window (for example `08:00`-`18:00`, set with
+`sudo child-time window 08:00 18:00`) is enforced with the same
+inclusive-start/exclusive-end boundary semantics.
 
 Automated tests complement live PAM and graphical-session acceptance
 testing; they do not replace it.

@@ -42,6 +42,12 @@ install -m 0755 "$ROOT_DIR/src/child-time-status" /usr/local/sbin/child-time-sta
 install -m 0755 "$ROOT_DIR/src/child-time" /usr/local/sbin/child-time
 install -m 0644 "$ROOT_DIR/systemd/child-time-enforcer.service" /etc/systemd/system/child-time-enforcer.service
 
+if [[ ! -e /etc/child-time-access.conf ]]; then
+  install -m 0600 "$ROOT_DIR/config/child-time-access.conf.example" /etc/child-time-access.conf
+else
+  chmod 0600 /etc/child-time-access.conf
+fi
+
 if [[ ! -e /etc/child-time-limit.conf ]]; then
   install -m 0600 "$ROOT_DIR/config/child-time-limit.conf.example" /etc/child-time-limit.conf
 else

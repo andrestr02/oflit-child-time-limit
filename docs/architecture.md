@@ -61,10 +61,24 @@ The access window is independent from the daily active-use quota.
 
 Global contract:
 
+    start <= local time < end
+
+configured administratively via `sudo child-time window START END` and
+stored in `/etc/child-time-access.conf` (`start=HH:MM` / `end=HH:MM`,
+same-day only: `start` must be strictly earlier than `end`). If that
+file is missing or fails to parse, both runtime paths fall back to the
+v1.2.0 default:
+
     09:00 <= local time < 17:00
 
 It applies to every username configured in
 `/etc/child-time-limit.conf`.
+
+Clock values for the access window are validated independently of
+"future today" semantics: unlike `child-time until` (a one-time
+wall-clock deadline), the window is a recurring daily policy, so
+configuring `start=08:00` at noon is valid and takes effect starting
+the next occurrence of 08:00.
 
 ### Login path
 
@@ -88,13 +102,25 @@ active-use allowance.
 
 ## Policy core and CLI adapter
 
-Administrator policy logic lives in `src/child_time_core.py`.
+Administrator policy logic, including access-window load/update, lives
+in `src/child_time_core.py`.
 
 `src/child-time` is the CLI adapter. The installed core is:
 
     /usr/local/lib/child-time-limit/child_time_core.py
 
-Runtime PAM and graphical-session enforcement remain separate.
+Runtime PAM and graphical-session enforcement remain separate: each
+reads `/etc/child-time-access.conf` directly with its own small,
+dependency-free parser rather than importing the policy core, so both
+paths observe the same configured window without a shared runtime
+dependency.
+
+`atomic_update_access_window` uses the same locking and atomic-replace
+strategy as daily-quota updates: an exclusive advisory lock plus a
+uniquely-named temporary file (`tempfile.mkstemp`) in the same
+directory, `fsync`'d before an atomic `os.replace()`. This avoids a
+fixed shared temp-file name that would let concurrent `child-time
+window` invocations race and corrupt or fail to write the config.
 
 ## Threat model
 

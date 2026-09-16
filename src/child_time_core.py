@@ -26,6 +26,9 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 
 CONFIG = Path("/etc/child-time-limit.conf")
+ACCESS_CONFIG = Path("/etc/child-time-access.conf")
+DEFAULT_ACCESS_START = "09:00"
+DEFAULT_ACCESS_END = "17:00"
 STATE_DIR = Path("/var/lib/child-time-limit")
 
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]*[$]?$", re.IGNORECASE)
@@ -101,6 +104,25 @@ def parse_clock(value, now=None):
     return target
 
 
+def parse_clock_of_day(value):
+    """Validate an HH:MM time-of-day value, independent of "future today".
+
+    Unlike parse_clock (used by `until`, a one-time wall-clock deadline),
+    an access-window boundary is a recurring daily policy: 08:00 is a
+    valid start even when configured at 12:00 today.
+    """
+    match = re.fullmatch(r"(?P<hour>\d{1,2}):(?P<minute>\d{2})", value.strip())
+    if not match:
+        raise ChildTimeError("Clock time must use HH:MM, for example 10:45.")
+
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ChildTimeError("Clock time is outside the valid 00:00-23:59 range.")
+
+    return f"{hour:02d}:{minute:02d}"
+
+
 def fmt(seconds):
     seconds = max(0, int(round(seconds)))
     hours, rem = divmod(seconds, 3600)
@@ -130,6 +152,109 @@ def validate_username(username, require_local=True):
             pwd.getpwnam(username)
         except KeyError as exc:
             raise ChildTimeError(f"Local user does not exist: {username}") from exc
+
+
+def load_access_window(path=None):
+    """Load the global local-time access window.
+
+    Missing config intentionally preserves the v1.2.0 default 09:00-17:00.
+    """
+    if path is None:
+        path = ACCESS_CONFIG
+
+    values = {
+        "start": DEFAULT_ACCESS_START,
+        "end": DEFAULT_ACCESS_END,
+    }
+
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        lines = []
+    except OSError as exc:
+        raise ChildTimeError(f"Cannot read {path}: {exc}") from exc
+
+    seen = set()
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ChildTimeError(f"Invalid access-window line in {path}: {raw}")
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key not in values:
+            raise ChildTimeError(f"Unknown access-window key in {path}: {key}")
+        if key in seen:
+            raise ChildTimeError(f"Duplicate access-window key in {path}: {key}")
+        seen.add(key)
+        values[key] = value
+
+    start = parse_clock_of_day(values["start"])
+    end = parse_clock_of_day(values["end"])
+
+    if start >= end:
+        raise ChildTimeError("Access-window start must be earlier than end.")
+
+    return start, end
+
+
+def within_access_window(now, start, end):
+    current = now.strftime("%H:%M")
+    return start <= current < end
+
+
+def _atomic_update_access_window_locked(start, end, path):
+    start = parse_clock_of_day(start)
+    end = parse_clock_of_day(end)
+
+    if start >= end:
+        raise ChildTimeError("Access-window start must be earlier than end.")
+
+    payload = (
+        "# Global child access window (local system time)\n"
+        f"start={start}\n"
+        f"end={end}\n"
+    )
+
+    fd = None
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+        with os.fdopen(fd, "w") as handle:
+            fd = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        temporary = None
+        dir_fd = os.open(path.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as exc:
+        raise ChildTimeError(f"Cannot update {path}: {exc}") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    return start, end
+
+
+def atomic_update_access_window(start, end, path=None):
+    if path is None:
+        path = ACCESS_CONFIG
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with policy_lock(path):
+        return _atomic_update_access_window_locked(start, end, path)
 
 
 def load_config(path=None):

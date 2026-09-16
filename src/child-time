@@ -67,6 +67,8 @@ atomic_update_limit = core.atomic_update_limit
 _atomic_update_limit_locked = core._atomic_update_limit_locked
 confirm_reduction = core.confirm_reduction
 status_rows = core.status_rows
+load_access_window = core.load_access_window
+atomic_update_access_window = core.atomic_update_access_window
 apply_limit_transaction = core.apply_limit_transaction
 local_now = core.local_now
 today = core.today
@@ -101,6 +103,19 @@ def _print_mutation_result(result):
     if result.reason:
         print(f"Mode       : {result.reason}")
     print("Reload     : automatic; service restart is not required")
+
+
+def command_window(args):
+    if args.start is None and args.end is None:
+        start, end = core.load_access_window()
+        print(f"Access window: {start}–{end}")
+        return
+
+    if args.start is None or args.end is None:
+        raise ChildTimeError("window requires both START and END, for example: child-time window 08:00 18:00")
+
+    start, end = core.atomic_update_access_window(args.start, args.end)
+    print(f"Access window updated: {start}–{end}")
 
 
 def command_set(args):
@@ -181,6 +196,13 @@ def build_parser():
     subtract.add_argument("duration")
     subtract.add_argument("--force", action="store_true")
 
+    window = sub.add_parser(
+        "window",
+        help="show or set the global child access window",
+    )
+    window.add_argument("start", nargs="?")
+    window.add_argument("end", nargs="?")
+
     until = sub.add_parser(
         "until",
         help="set enough remaining active-use quota to reach a local HH:MM target",
@@ -201,6 +223,8 @@ def main(argv=None):
             if args.username:
                 validate_username(args.username)
             print_status(args.username)
+        elif args.command == "window":
+            command_window(args)
         elif args.command == "set":
             command_set(args)
         elif args.command == "add":

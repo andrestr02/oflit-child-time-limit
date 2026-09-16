@@ -21,22 +21,65 @@ The project was created after testing desktop parental-control approaches that c
 Configured child accounts are subject to two independent limits:
 
 1. a cumulative daily active-use quota; and
-2. a global local-time access window from **09:00 inclusive to 17:00 exclusive**.
+2. a global local-time access window, **09:00 inclusive to 17:00 exclusive by default**.
 
 A child may consume the configured daily quota at any time inside that
-window. Unused quota does not permit access after 17:00.
+window. Unused quota does not permit access outside the window.
 
-At or after 17:00, an active configured graphical session is terminated
-even when daily quota remains. Before 09:00, PAM rejects login for
-configured child accounts.
+At or after the window's end, an active configured graphical session is
+terminated even when daily quota remains. Before the window's start, PAM
+rejects login for configured child accounts.
 
 The access window applies only to usernames present in
 `/etc/child-time-limit.conf`. Unconfigured users retain the existing
 fail-open behavior.
 
-The access window is currently a fixed global runtime policy. The
-configuration file continues to contain only daily quotas in the form
-`username=seconds-per-day`.
+The access window is stored separately from daily quotas, in
+`/etc/child-time-access.conf`:
+
+```ini
+start=09:00
+end=17:00
+```
+
+The daily-quota configuration file is unaffected and continues to
+contain only `username=seconds-per-day`.
+
+### Configure the access window
+
+Show the current window:
+
+```bash
+sudo child-time window
+```
+
+```text
+Access window: 09:00–17:00
+```
+
+Set a new window:
+
+```bash
+sudo child-time window 08:00 18:00
+```
+
+```text
+Access window updated: 08:00–18:00
+```
+
+`START` and `END` use 24-hour `HH:MM` local time. Unlike `child-time
+until`, these are recurring daily boundaries, not one-time deadlines --
+you can configure a start time that has already passed today (for
+example, setting `08:00` as the start at noon), because it takes effect
+every day, not just today.
+
+**Same-day windows only.** `START` must be strictly earlier than `END`;
+overnight windows (e.g. `22:00` to `06:00`) are not supported.
+
+If `/etc/child-time-access.conf` is missing or cannot be parsed, the
+runtime falls back to the default `09:00`–`17:00` window. The change
+takes effect immediately for both the PAM login gate and the running
+enforcer; no service restart is required.
 
 ## Architecture
 
@@ -164,7 +207,14 @@ sudo child-time until child1 10:45
 
 `until` is intentionally defined in terms of **remaining active usage**. It converts the current wall-clock interval into quota. If the child logs out or becomes inactive, unused quota remains; this is not a hard wall-clock logout schedule.
 
-Policy changes are read automatically by the enforcer. **A service restart is not required after changing a limit.**
+Show or change the global access window (see [Access window](#access-window)):
+
+```bash
+sudo child-time window
+sudo child-time window 08:00 18:00
+```
+
+Policy changes are read automatically by the enforcer. **A service restart is not required after changing a limit or the access window.**
 
 ## Check usage
 
@@ -245,11 +295,23 @@ The uninstaller removes the service, helper commands, and OFLIT PAM line. It doe
 
 ## Project status
 
-**v1.1.1 maintenance**
+**v1.3.0**
 
-v1.1.0 has been released and production-accepted with the unified human-friendly administrator CLI, atomic policy transactions, concurrent-update protection, reduction guards, and persistent usage preservation.
+v1.3.0 makes the global access window administrator-configurable through
+`sudo child-time window`, stored in `/etc/child-time-access.conf` and
+observed immediately by both the PAM login gate and the running
+enforcer, with same-day-only windows and a `09:00`–`17:00` fallback
+default.
 
-v1.1.1 is a focused maintenance patch that ensures an upgraded enforcer is explicitly restarted so the running process uses the newly installed artifact, and aligns legacy `child-time-status` usage reporting with the unified CLI when consumed usage exceeds a force-reduced limit.
+v1.2.0 introduced the global access window itself and
+`child_time_core.py` as the shared policy core. v1.1.0 introduced the
+unified human-friendly administrator CLI, atomic policy transactions,
+concurrent-update protection, reduction guards, and persistent usage
+preservation. v1.1.1 was a focused maintenance patch that ensures an
+upgraded enforcer is explicitly restarted so the running process uses
+the newly installed artifact, and aligns legacy `child-time-status`
+usage reporting with the unified CLI when consumed usage exceeds a
+force-reduced limit.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for version notes.
 

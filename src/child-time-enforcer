@@ -5,19 +5,58 @@ import os
 import subprocess
 import time
 from datetime import datetime
+from pathlib import Path
 
 CONFIG = "/etc/child-time-limit.conf"
 STATE_DIR = "/var/lib/child-time-limit"
 LOCK_FILE = "/run/child-time-limit.lock"
 POLL_SECONDS = 1.0
 
-ACCESS_START = (9, 0)
-ACCESS_END = (17, 0)
+ACCESS_CONFIG = Path("/etc/child-time-access.conf")
+DEFAULT_ACCESS_START = (9, 0)
+DEFAULT_ACCESS_END = (17, 0)
+
+
+def load_access_window():
+    start = DEFAULT_ACCESS_START
+    end = DEFAULT_ACCESS_END
+
+    try:
+        lines = ACCESS_CONFIG.read_text().splitlines()
+    except FileNotFoundError:
+        return start, end
+    except OSError:
+        return start, end
+
+    values = {}
+    try:
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, value = (part.strip() for part in line.split("=", 1))
+            if key not in ("start", "end") or key in values:
+                return DEFAULT_ACCESS_START, DEFAULT_ACCESS_END
+            hour, minute = map(int, value.split(":"))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return DEFAULT_ACCESS_START, DEFAULT_ACCESS_END
+            values[key] = (hour, minute)
+    except (ValueError, TypeError):
+        return DEFAULT_ACCESS_START, DEFAULT_ACCESS_END
+
+    start = values.get("start", start)
+    end = values.get("end", end)
+
+    if start >= end:
+        return DEFAULT_ACCESS_START, DEFAULT_ACCESS_END
+
+    return start, end
 
 
 def within_access_window(now):
+    start, end = load_access_window()
     current = (now.hour, now.minute)
-    return ACCESS_START <= current < ACCESS_END
+    return start <= current < end
 
 
 os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
