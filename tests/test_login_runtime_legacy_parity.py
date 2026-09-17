@@ -30,10 +30,14 @@ class LegacyLoginParityTests(unittest.TestCase):
         self.limit_config = self.root / "child-time-limit.conf"
         self.access_config = self.root / "child-time-access.conf"
         self.state_dir = self.root / "state"
+        self.schedule_config = self.root / "child-time-schedule.conf"
+        self.schedule_state_dir = self.root / "schedules"
 
         self.state_dir.mkdir()
+        self.schedule_state_dir.mkdir()
         self.limit_config.write_text("azzahra=7200\n")
         self.access_config.write_text("start=09:00\nend=17:00\n")
+        self.schedule_config.write_text("")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -57,6 +61,8 @@ class LegacyLoginParityTests(unittest.TestCase):
             config_path=self.limit_config,
             access_config_path=self.access_config,
             state_dir=self.state_dir,
+            schedule_config_path=self.schedule_config,
+            schedule_state_dir=self.schedule_state_dir,
         )
 
         self.assertTrue(result.allowed)
@@ -73,6 +79,8 @@ class LegacyLoginParityTests(unittest.TestCase):
             config_path=self.limit_config,
             access_config_path=self.access_config,
             state_dir=self.state_dir,
+            schedule_config_path=self.schedule_config,
+            schedule_state_dir=self.schedule_state_dir,
         )
 
         self.assertTrue(result.allowed)
@@ -89,6 +97,8 @@ class LegacyLoginParityTests(unittest.TestCase):
             config_path=self.limit_config,
             access_config_path=self.access_config,
             state_dir=self.state_dir,
+            schedule_config_path=self.schedule_config,
+            schedule_state_dir=self.schedule_state_dir,
         )
 
         self.assertFalse(result.allowed)
@@ -102,9 +112,6 @@ class ScheduledLoginRuntimeTests(LegacyLoginParityTests):
     def setUp(self):
         super().setUp()
 
-        self.schedule_config = self.root / "child-time-schedule.conf"
-        self.schedule_state_dir = self.root / "schedules"
-        self.schedule_state_dir.mkdir()
 
         self.schedule_config.write_text(
             "[azzahra]\n"

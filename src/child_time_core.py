@@ -874,6 +874,7 @@ def apply_limit_transaction(
     reason=None,
     config_path=None,
     state_dir=None,
+    schedule_path=None,
 ):
     """Authoritative transactional policy mutation.
 
@@ -886,8 +887,17 @@ def apply_limit_transaction(
     LimitMutationResult.
     """
     validate_username(username)
+
+    # Keep custom/test policy trees isolated from production.
+    # Production callers that omit config_path continue to use the
+    # authoritative /etc schedule configuration.
     if config_path is None:
         config_path = CONFIG
+    elif schedule_path is None:
+        schedule_path = (
+            Path(config_path).parent
+            / "child-time-schedule.conf"
+        )
 
     with policy_lock(config_path):
         _, limits, _ = load_config(config_path)
@@ -905,7 +915,10 @@ def apply_limit_transaction(
 
         candidate_limits = dict(limits)
         candidate_limits[username] = new_limit
-        schedules = load_schedule_policy(limits=candidate_limits)
+        schedules = load_schedule_policy(
+            path=schedule_path,
+            limits=candidate_limits,
+        )
         validate_scheduled_daily_ceiling(
             username,
             new_limit,

@@ -294,9 +294,13 @@ class StateAndStatusTests(unittest.TestCase):
                 f"{core.today()} 5400\n"
             )
 
+            schedule = root / "child-time-schedule.conf"
+            schedule.write_text("")
+
             rows = core.status_rows(
                 config_path=config,
                 state_dir=state_dir,
+                schedule_path=schedule,
             )
 
             self.assertEqual(rows[0].username, "child")

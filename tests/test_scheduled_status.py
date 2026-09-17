@@ -87,7 +87,9 @@ class ScheduledStatusTests(unittest.TestCase):
     def test_status_rows_preserves_legacy_user(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "limits.conf"
+            schedule = Path(tmp) / "schedule.conf"
             config.write_text("hudzaifah=7200\n")
+            schedule.write_text("")
 
             with mock.patch.object(
                 core,
@@ -97,6 +99,7 @@ class ScheduledStatusTests(unittest.TestCase):
                 rows = core.status_rows(
                     selected="hudzaifah",
                     config_path=config,
+                    schedule_path=schedule,
                 )
 
         self.assertEqual(len(rows), 1)
