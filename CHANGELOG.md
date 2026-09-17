@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.3.1 — 2026-09-17
+
+### Fixed
+
+- Move the PAM login check from global `common-account` to `gdm-password`.
+- Prevent `child-time-login-check` from blocking the GDM greeter environment.
+- Migrate the legacy `common-account` PAM rule installed by v1.3.0 and earlier.
+- Add regression coverage for safe GDM PAM integration.
+
+
 All notable changes to OFLIT Child Time Limit will be documented in this file.
 
 ## [1.3.0] - 2026-09-17

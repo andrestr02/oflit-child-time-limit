@@ -7,7 +7,7 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PAM_FILE="/etc/pam.d/common-account"
+PAM_FILE="/etc/pam.d/gdm-password"
 PAM_MARKER="# OFLIT Child Time Limit"
 PAM_RULE="account required pam_exec.so quiet /usr/local/sbin/child-time-login-check"
 BACKUP_DIR="/var/lib/child-time-limit/backups"
@@ -33,7 +33,17 @@ fi
 install -d -m 0700 /var/lib/child-time-limit
 install -d -m 0700 "$BACKUP_DIR"
 install -d -m 0755 /usr/local/lib/child-time-limit
-cp -a "$PAM_FILE" "$BACKUP_DIR/common-account.$STAMP"
+cp -a "$PAM_FILE" "$BACKUP_DIR/gdm-password.$STAMP"
+
+# v1.3.1 migration:
+# Remove the legacy global PAM hook installed by <= v1.3.0.
+# common-account is also used by GDM's greeter environment, so the
+# child-time check must never remain there.
+LEGACY_PAM_FILE="/etc/pam.d/common-account"
+if [[ -f "$LEGACY_PAM_FILE" ]] && grep -Fqx "$PAM_RULE" "$LEGACY_PAM_FILE"; then
+  cp -a "$LEGACY_PAM_FILE" "$BACKUP_DIR/common-account.$STAMP"
+  sed -i "\|^${PAM_RULE}$|d" "$LEGACY_PAM_FILE"
+fi
 
 install -m 0644 "$ROOT_DIR/src/child_time_core.py" /usr/local/lib/child-time-limit/child_time_core.py
 install -m 0755 "$ROOT_DIR/src/child-time-enforcer" /usr/local/sbin/child-time-enforcer
@@ -68,7 +78,7 @@ systemctl restart child-time-enforcer.service
 
 if ! systemctl is-active --quiet child-time-enforcer.service; then
   echo "Enforcer failed to start. Restoring PAM backup." >&2
-  cp -a "$BACKUP_DIR/common-account.$STAMP" "$PAM_FILE"
+  cp -a "$BACKUP_DIR/gdm-password.$STAMP" "$PAM_FILE"
   systemctl disable --now child-time-enforcer.service 2>/dev/null || true
   exit 1
 fi
