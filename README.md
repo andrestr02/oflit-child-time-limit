@@ -7,6 +7,7 @@ The project was created after testing desktop parental-control approaches that c
 ## What it does
 
 - Tracks cumulative **active graphical-session time** per configured Linux user.
+- Enforces a configurable global local-time access window for configured child accounts.
 - Persists daily usage in `/var/lib/child-time-limit/`.
 - Survives logout/login and reboot.
 - Calls `loginctl terminate-user` when a configured user reaches the quota.
@@ -274,6 +275,9 @@ Recommended acceptance sequence:
 7. Reboot and confirm the same-day denial persists.
 8. Simulate or wait for the next calendar day and confirm a new daily quota starts.
 9. Verify `child-time set/add/subtract/until` without restarting the service.
+10. Set a temporary access window and confirm login is rejected before its start.
+11. Confirm an active configured graphical session is terminated when the window ends.
+12. Change the access window with `child-time window START END` and confirm the new policy takes effect without restarting the service.
 
 See [`docs/testing.md`](docs/testing.md) for commands and expected results.
 
@@ -282,7 +286,7 @@ See [`docs/testing.md`](docs/testing.md) for commands and expected results.
 The CLI parser and atomic policy update behavior have standard-library unit tests:
 
 ```bash
-python3 -m unittest tests/test_child_time_cli.py
+python3 -m unittest discover -v tests
 ```
 
 ## Uninstall
@@ -291,17 +295,25 @@ python3 -m unittest tests/test_child_time_cli.py
 sudo bash uninstall.sh
 ```
 
-The uninstaller removes the service, helper commands, and OFLIT PAM line. It does not delete usage state or configuration unless you explicitly choose to remove them afterward.
+The uninstaller removes the service, helper commands, and OFLIT PAM integration. It cleans the current `gdm-password` rule as well as legacy `common-account` remnants. It does not delete usage state or configuration unless you explicitly choose to remove them afterward.
 
 ## Project status
 
-**v1.3.0**
+**v1.3.1**
 
-v1.3.0 makes the global access window administrator-configurable through
-`sudo child-time window`, stored in `/etc/child-time-access.conf` and
-observed immediately by both the PAM login gate and the running
-enforcer, with same-day-only windows and a `09:00`–`17:00` fallback
-default.
+v1.3.1 fixes the GDM PAM integration used by access-window enforcement.
+The child-time login check is attached to `gdm-password` instead of the
+global `common-account` stack, preventing it from blocking the GDM
+greeter environment.
+
+The installer migrates the legacy global PAM rule, and the uninstaller
+cleans both the current `gdm-password` integration and legacy
+`common-account` remnants.
+
+v1.3.0 introduced the administrator-configurable global access window
+through `sudo child-time window`, stored in
+`/etc/child-time-access.conf` and observed immediately by both the PAM
+login gate and the running enforcer.
 
 v1.2.0 introduced the global access window itself and
 `child_time_core.py` as the shared policy core. v1.1.0 introduced the
@@ -315,7 +327,8 @@ force-reduced limit.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for version notes.
 
-This is still a small community project. Review the code and test it on your own distribution before using it as a safety-critical control.
+This is still a small community project. Review the code and test it on
+your own distribution before using it as a safety-critical control.
 
 ## License
 
