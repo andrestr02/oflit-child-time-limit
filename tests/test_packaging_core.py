@@ -12,7 +12,7 @@ class CorePackagingTests(unittest.TestCase):
     def test_version_file_has_a_real_trailing_newline_not_an_escaped_literal(self):
         raw = (ROOT / "VERSION").read_bytes()
         self.assertNotIn(b"\\n", raw)
-        self.assertEqual(raw, b"1.3.0\n")
+        self.assertEqual(raw, b"1.3.1\n")
 
     def test_installer_creates_default_access_config_on_fresh_install(self):
         installer = (ROOT / "install.sh").read_text()

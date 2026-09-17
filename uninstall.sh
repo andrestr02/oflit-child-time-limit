@@ -6,7 +6,7 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
-PAM_FILE="/etc/pam.d/common-account"
+PAM_FILE="/etc/pam.d/gdm-password"
 PAM_MARKER="# OFLIT Child Time Limit"
 PAM_RULE="account required pam_exec.so quiet /usr/local/sbin/child-time-login-check"
 
@@ -27,6 +27,12 @@ lines = path.read_text().splitlines()
 filtered = [line for line in lines if line not in (marker, rule)]
 path.write_text("\n".join(filtered) + "\n")
 PY
+fi
+
+# Remove legacy global PAM rule left by v1.3.0 and earlier.
+LEGACY_PAM_FILE="/etc/pam.d/common-account"
+if [[ -f "$LEGACY_PAM_FILE" ]]; then
+  sed -i "\|^${PAM_RULE}$|d; \|^${PAM_MARKER}$|d" "$LEGACY_PAM_FILE"
 fi
 
 rm -f /usr/local/sbin/child-time-enforcer
