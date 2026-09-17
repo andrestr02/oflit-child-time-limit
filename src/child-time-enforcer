@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 
 import fcntl
+import importlib.machinery
+import importlib.util
 import os
 import subprocess
 import time
@@ -15,6 +17,39 @@ POLL_SECONDS = 1.0
 ACCESS_CONFIG = Path("/etc/child-time-access.conf")
 DEFAULT_ACCESS_START = (9, 0)
 DEFAULT_ACCESS_END = (17, 0)
+
+
+def _load_core():
+    candidates = [
+        Path(__file__).resolve().with_name("child_time_core.py"),
+        Path("/usr/local/lib/child-time-limit/child_time_core.py"),
+    ]
+
+    for path in candidates:
+        if not path.exists():
+            continue
+
+        loader = importlib.machinery.SourceFileLoader(
+            "child_time_core_enforcer",
+            str(path),
+        )
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        return module
+
+    raise RuntimeError("child_time_core.py not found")
+
+
+core = _load_core()
+
+
+def persist_scheduled_runtime(*, write_schedule, write_daily):
+    """Persist scheduled state before legacy daily compatibility state."""
+    return core.persist_scheduled_accounting(
+        write_slot=write_schedule,
+        write_daily=write_daily,
+    )
 
 
 def load_access_window():
@@ -172,17 +207,139 @@ def terminate(username):
 
 
 
+class ScheduledRuntimeResult:
+    def __init__(
+        self,
+        *,
+        charged_seconds,
+        daily_used,
+        slot_usage,
+        terminate,
+        reason,
+    ):
+        self.charged_seconds = charged_seconds
+        self.daily_used = daily_used
+        self.slot_usage = slot_usage
+        self.terminate = terminate
+        self.reason = reason
+
+
+def process_scheduled_interval(
+    *,
+    daily_limit,
+    legacy_used,
+    slots,
+    slot_usage,
+    start_second,
+    end_second,
+    minute_of_day,
+):
+    """Account one scheduled-user interval and decide enforcement."""
+
+    reconciled_daily = core.reconcile_daily_used(
+        legacy_used,
+        slot_usage,
+    )
+
+    accounting = core.account_scheduled_interval(
+        daily_limit=daily_limit,
+        daily_used=reconciled_daily,
+        slots=slots,
+        slot_usage=slot_usage,
+        start_second=start_second,
+        end_second=end_second,
+    )
+
+    enforcement = core.evaluate_scheduled_enforcement(
+        daily_limit=daily_limit,
+        daily_used=accounting.daily_used,
+        slots=slots,
+        slot_usage=accounting.slot_usage,
+        minute_of_day=minute_of_day,
+    )
+
+    return ScheduledRuntimeResult(
+        charged_seconds=accounting.charged_seconds,
+        daily_used=accounting.daily_used,
+        slot_usage=accounting.slot_usage,
+        terminate=enforcement.terminate,
+        reason=enforcement.reason,
+    )
+
+
+class ScheduledRuntimeResult:
+    def __init__(
+        self,
+        *,
+        charged_seconds,
+        daily_used,
+        slot_usage,
+        terminate,
+        reason,
+    ):
+        self.charged_seconds = charged_seconds
+        self.daily_used = daily_used
+        self.slot_usage = slot_usage
+        self.terminate = terminate
+        self.reason = reason
+
+
+def process_scheduled_interval(
+    *,
+    daily_limit,
+    legacy_used,
+    slots,
+    slot_usage,
+    start_second,
+    end_second,
+    minute_of_day,
+):
+    """Account one scheduled-user interval and decide enforcement."""
+
+    reconciled_daily = core.reconcile_daily_used(
+        legacy_used,
+        slot_usage,
+    )
+
+    accounting = core.account_scheduled_interval(
+        daily_limit=daily_limit,
+        daily_used=reconciled_daily,
+        slots=slots,
+        slot_usage=slot_usage,
+        start_second=start_second,
+        end_second=end_second,
+    )
+
+    enforcement = core.evaluate_scheduled_enforcement(
+        daily_limit=daily_limit,
+        daily_used=accounting.daily_used,
+        slots=slots,
+        slot_usage=accounting.slot_usage,
+        minute_of_day=minute_of_day,
+    )
+
+    return ScheduledRuntimeResult(
+        charged_seconds=accounting.charged_seconds,
+        daily_used=accounting.daily_used,
+        slot_usage=accounting.slot_usage,
+        terminate=enforcement.terminate,
+        reason=enforcement.reason,
+    )
+
 def main():
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(core.SCHEDULE_STATE_DIR, mode=0o700, exist_ok=True)
+    os.chmod(core.SCHEDULE_STATE_DIR, 0o700)
 
     # Only one enforcer instance may run at a time.
     lock = open(LOCK_FILE, "w")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-
     limits = load_limits()
     previous_active = active_graphical_users(limits)
     previous_tick = time.monotonic()
+    previous_wall = datetime.now().astimezone()
+
     usage_cache = {}
     cache_day = local_day()
 
@@ -193,7 +350,9 @@ def main():
         elapsed = max(0.0, now - previous_tick)
         previous_tick = now
 
-        day = local_day()
+        wall_now = datetime.now().astimezone()
+        day = wall_now.date().isoformat()
+
         if day != cache_day:
             usage_cache.clear()
             cache_day = day
@@ -201,8 +360,39 @@ def main():
         limits = load_limits()
         current_active = active_graphical_users(limits)
 
+        try:
+            schedule_policy = core.load_schedule_policy(limits=limits)
+            schedule_policy_error = False
+        except core.ChildTimeError:
+            # Daily-only users retain legacy behaviour. Configured children
+            # cannot safely use scheduled policy while that policy is broken.
+            schedule_policy = {}
+            schedule_policy_error = True
+
+        same_day_interval = previous_wall.date() == wall_now.date()
+
+        if same_day_interval:
+            start_second = (
+                previous_wall.hour * 3600
+                + previous_wall.minute * 60
+                + previous_wall.second
+                + previous_wall.microsecond / 1_000_000
+            )
+            end_second = (
+                wall_now.hour * 3600
+                + wall_now.minute * 60
+                + wall_now.second
+                + wall_now.microsecond / 1_000_000
+            )
+        else:
+            start_second = None
+            end_second = None
+
+        minute_of_day = wall_now.hour * 60 + wall_now.minute
+
         # Charge the interval to users who were active at the start of it.
-        # A login/logout transition can therefore differ by at most one poll.
+        # Legacy users retain v1.3.x monotonic accounting. Scheduled users
+        # use local wall-clock intersection so slot START/END is exact.
         for username in previous_active:
             if username not in limits:
                 continue
@@ -212,29 +402,94 @@ def main():
             if username not in usage_cache:
                 usage_cache[username] = read_state(username, day)
 
-            used = usage_cache[username]
+            legacy_used = usage_cache[username]
+            slots = schedule_policy.get(username, [])
 
-            if used >= limit:
-                # A policy reduction must never erase already-consumed usage.
-                # Keep the historical state as-is and enforce the new lower limit.
+            if not slots:
+                if schedule_policy_error:
+                    # We cannot know whether a configured child should have
+                    # scheduled restrictions when the policy is malformed.
+                    terminate(username)
+                    continue
+
+                if legacy_used >= limit:
+                    # A policy reduction must never erase consumed usage.
+                    terminate(username)
+                    continue
+
+                used = min(float(limit), legacy_used + elapsed)
+                usage_cache[username] = used
+
+                # Preserve v1.3.x persistence/enforcement ordering.
+                write_state(username, day, used)
+
+                if used >= limit:
+                    terminate(username)
+
+                continue
+
+            # Scheduled policy is same-day only in v1.4. If a polling interval
+            # crosses midnight, do not charge it to either day's slot.
+            if not same_day_interval:
                 terminate(username)
                 continue
 
-            used = min(float(limit), used + elapsed)
-            usage_cache[username] = used
+            try:
+                slot_usage = core.read_schedule_used(
+                    username,
+                    slots,
+                    day=day,
+                )
 
-            # Persist before enforcement so reboot cannot restore consumed time.
-            write_state(username, day, used)
+                runtime = process_scheduled_interval(
+                    daily_limit=limit,
+                    legacy_used=legacy_used,
+                    slots=slots,
+                    slot_usage=slot_usage,
+                    start_second=start_second,
+                    end_second=end_second,
+                    minute_of_day=minute_of_day,
+                )
 
-            if used >= limit:
+                def write_schedule():
+                    core.write_schedule_used(
+                        username,
+                        slots,
+                        runtime.slot_usage,
+                        day=day,
+                    )
+
+                def write_daily():
+                    write_state(
+                        username,
+                        day,
+                        runtime.daily_used,
+                    )
+
+                # Crash-safety invariant:
+                # scheduled state becomes durable before legacy daily state.
+                persist_scheduled_runtime(
+                    write_schedule=write_schedule,
+                    write_daily=write_daily,
+                )
+
+                usage_cache[username] = runtime.daily_used
+
+                if runtime.terminate:
+                    terminate(username)
+
+            except (core.ChildTimeError, OSError):
+                # Configured scheduled child fails closed if accounting or
+                # persistence cannot be trusted.
                 terminate(username)
 
-        wall_now = datetime.now().astimezone()
+        # Global access window remains the outer guard for all configured users.
         if not within_access_window(wall_now):
             for username in current_active:
                 terminate(username)
 
         previous_active = current_active
+        previous_wall = wall_now
 
 
 if __name__ == "__main__":
