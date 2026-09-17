@@ -782,3 +782,71 @@ def apply_limit_transaction(
         remaining=remaining,
         reason=reason,
     )
+
+
+class LoginEligibility(NamedTuple):
+    allowed: bool
+    reason: str
+    slot: Optional[ScheduledSlot]
+
+
+def evaluate_login_eligibility(
+    daily_limit,
+    daily_used,
+    slots,
+    slot_usage,
+    minute_of_day,
+):
+    """Evaluate daily/scheduled quota eligibility without performing I/O.
+
+    Global access-window eligibility remains the caller's responsibility.
+    An empty slot list preserves legacy daily-quota behavior.
+    """
+    try:
+        daily_limit = int(daily_limit)
+        daily_used = int(daily_used)
+        minute_of_day = int(minute_of_day)
+    except (TypeError, ValueError) as exc:
+        raise ChildTimeError("Invalid login eligibility input.") from exc
+
+    if daily_limit <= 0:
+        raise ChildTimeError("Daily limit must be greater than zero.")
+    if daily_used < 0:
+        raise ChildTimeError("Daily usage cannot be negative.")
+    if not 0 <= minute_of_day < 24 * 60:
+        raise ChildTimeError("Minute of day must be between 0 and 1439.")
+
+    known_slots = {slot.slot_id: slot for slot in slots}
+    for slot_id, raw_used in slot_usage.items():
+        if slot_id not in known_slots:
+            raise ChildTimeError(f"Unknown scheduled state slot: {slot_id}")
+        try:
+            used = int(raw_used)
+        except (TypeError, ValueError) as exc:
+            raise ChildTimeError(
+                f"Invalid scheduled usage for {slot_id}: {raw_used}"
+            ) from exc
+        if used < 0:
+            raise ChildTimeError(f"Scheduled usage cannot be negative: {slot_id}")
+        if used > known_slots[slot_id].quota_seconds:
+            raise ChildTimeError(
+                f"Scheduled usage exceeds slot quota: {slot_id}"
+            )
+
+    effective_daily_used = reconcile_daily_used(daily_used, slot_usage)
+
+    if effective_daily_used >= daily_limit:
+        return LoginEligibility(False, "daily_exhausted", None)
+
+    if not slots:
+        return LoginEligibility(True, "allowed", None)
+
+    slot = resolve_active_slot(slots, minute_of_day)
+    if slot is None:
+        return LoginEligibility(False, "outside_slot", None)
+
+    used = slot_usage.get(slot.slot_id, 0)
+    if used >= slot.quota_seconds:
+        return LoginEligibility(False, "slot_exhausted", slot)
+
+    return LoginEligibility(True, "allowed", slot)

@@ -1,27 +1,60 @@
 #!/usr/bin/python3
 
+import importlib.machinery
+import importlib.util
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
-CONFIG = "/etc/child-time-limit.conf"
-STATE_DIR = "/var/lib/child-time-limit"
+
+CONFIG = Path("/etc/child-time-limit.conf")
+STATE_DIR = Path("/var/lib/child-time-limit")
 
 ACCESS_CONFIG = Path("/etc/child-time-access.conf")
+SCHEDULE_CONFIG = Path("/etc/child-time-schedule.conf")
+SCHEDULE_STATE_DIR = STATE_DIR / "schedules"
 DEFAULT_ACCESS_START = (9, 0)
 DEFAULT_ACCESS_END = (17, 0)
 
+_SCRIPT_PATH = Path(__file__).resolve()
+_SIBLING_CORE = _SCRIPT_PATH.parent / "child_time_core.py"
+_INSTALLED_CORE = Path("/usr/local/lib/child-time-limit/child_time_core.py")
 
-def load_access_window():
+
+def _load_core():
+    if _SIBLING_CORE.is_file():
+        core_path = _SIBLING_CORE
+    elif _INSTALLED_CORE.is_file():
+        core_path = _INSTALLED_CORE
+    else:
+        raise ImportError(
+            "Cannot locate child_time_core.py beside "
+            f"{_SCRIPT_PATH} or at {_INSTALLED_CORE}"
+        )
+
+    loader = importlib.machinery.SourceFileLoader(
+        "child_time_core", str(core_path)
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError(f"Cannot create import spec for {core_path}")
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+core = _load_core()
+
+
+def load_access_window(path=None):
+    path = Path(path) if path is not None else ACCESS_CONFIG
     start = DEFAULT_ACCESS_START
     end = DEFAULT_ACCESS_END
 
     try:
-        lines = ACCESS_CONFIG.read_text().splitlines()
-    except FileNotFoundError:
-        return start, end
-    except OSError:
+        lines = path.read_text().splitlines()
+    except (FileNotFoundError, OSError):
         return start, end
 
     values = {}
@@ -49,58 +82,101 @@ def load_access_window():
     return start, end
 
 
-def within_access_window(now):
-    start, end = load_access_window()
+def within_access_window(now, path=None):
+    start, end = load_access_window(path)
     current = (now.hour, now.minute)
     return start <= current < end
 
 
-username = os.environ.get("PAM_USER", "")
+def check_login(
+    username,
+    now,
+    *,
+    config_path=CONFIG,
+    access_config_path=ACCESS_CONFIG,
+    state_dir=STATE_DIR,
+    schedule_config_path=SCHEDULE_CONFIG,
+    schedule_state_dir=SCHEDULE_STATE_DIR,
+):
+    # Preserve v1.3.1 fail-open behavior for broken daily configuration.
+    try:
+        _, limits, _ = core.load_config(Path(config_path))
+    except Exception:
+        return core.LoginEligibility(True, "config_error_fail_open", None)
 
-limits = {}
-try:
-    with open(CONFIG) as handle:
-        for raw in handle:
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, seconds = line.split("=", 1)
-            name = name.strip()
-            seconds = int(seconds.strip())
-            if name and seconds > 0:
-                limits[name] = seconds
-except Exception:
-    # Fail open so configuration problems cannot lock out unrelated admins.
-    sys.exit(0)
+    # Critical GDM/admin invariant: unrelated users are never restricted.
+    if username not in limits:
+        return core.LoginEligibility(True, "unconfigured", None)
 
-if username not in limits:
-    sys.exit(0)
+    if not within_access_window(now, access_config_path):
+        return core.LoginEligibility(False, "outside_access_window", None)
 
-now = datetime.now().astimezone()
+    day = now.date().isoformat()
 
-if not within_access_window(now):
-    window_start, window_end = load_access_window()
-    print(
-        "Computer access is allowed only between "
-        f"{window_start[0]:02d}:{window_start[1]:02d} and "
-        f"{window_end[0]:02d}:{window_end[1]:02d}."
-    )
-    sys.exit(1)
+    # Preserve v1.3.1 legacy-state fail-open behavior.
+    try:
+        used = core.read_used(
+            username,
+            day=day,
+            state_dir=Path(state_dir),
+        )
+    except core.ChildTimeError:
+        used = 0
 
-today = now.date().isoformat()
-path = os.path.join(STATE_DIR, username + ".state")
-used = 0
+    minute_of_day = now.hour * 60 + now.minute
 
-try:
-    with open(path) as handle:
-        parts = handle.read().strip().split()
-    if len(parts) >= 2 and parts[0] == today:
-        used = int(float(parts[1]))
-except (FileNotFoundError, ValueError, OSError):
-    pass
+    # Missing schedule config intentionally preserves v1.3.x behavior.
+    # For a configured child, malformed schedule/state is fail-closed:
+    # accounting uncertainty must never restore restricted time.
+    try:
+        schedules = core.load_schedule_policy(
+            path=Path(schedule_config_path),
+            limits=limits,
+        )
+        slots = schedules.get(username, [])
 
-if used >= limits[username]:
-    print("Daily computer time limit has been reached.")
-    sys.exit(1)
+        if slots:
+            slot_usage = core.read_schedule_used(
+                username,
+                slots,
+                day=day,
+                state_dir=Path(schedule_state_dir),
+            )
+        else:
+            slot_usage = {}
 
-sys.exit(0)
+        return core.evaluate_login_eligibility(
+            daily_limit=limits[username],
+            daily_used=used,
+            slots=slots,
+            slot_usage=slot_usage,
+            minute_of_day=minute_of_day,
+        )
+    except core.ChildTimeError:
+        return core.LoginEligibility(False, "policy_error", None)
+
+
+def main():
+    username = os.environ.get("PAM_USER", "")
+    now = datetime.now().astimezone()
+
+    result = check_login(username, now)
+
+    if result.allowed:
+        return 0
+
+    if result.reason == "outside_access_window":
+        window_start, window_end = load_access_window()
+        print(
+            "Computer access is allowed only between "
+            f"{window_start[0]:02d}:{window_start[1]:02d} and "
+            f"{window_end[0]:02d}:{window_end[1]:02d}."
+        )
+    elif result.reason == "daily_exhausted":
+        print("Daily computer time limit has been reached.")
+
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
