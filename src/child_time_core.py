@@ -27,6 +27,7 @@ from typing import NamedTuple, Optional
 
 CONFIG = Path("/etc/child-time-limit.conf")
 ACCESS_CONFIG = Path("/etc/child-time-access.conf")
+SCHEDULE_CONFIG = Path("/etc/child-time-schedule.conf")
 DEFAULT_ACCESS_START = "09:00"
 DEFAULT_ACCESS_END = "17:00"
 STATE_DIR = Path("/var/lib/child-time-limit")
@@ -57,6 +58,14 @@ class LimitMutationResult(NamedTuple):
     new_limit: int
     remaining: int
     reason: Optional[str] = None
+
+
+class ScheduledSlot(NamedTuple):
+    username: str
+    start_minute: int
+    end_minute: int
+    quota_seconds: int
+    slot_id: str
 
 
 def local_now():
@@ -285,6 +294,143 @@ def load_config(path=None):
         line_indexes[name] = index
 
     return raw_lines, limits, line_indexes
+
+
+def _clock_to_minute(value):
+    normalized = parse_clock_of_day(value)
+    hour, minute = (int(part) for part in normalized.split(":", 1))
+    return normalized, hour * 60 + minute
+
+
+def load_schedule_policy(path=None, limits=None, config_path=None):
+    """Load optional per-user scheduled active-use quotas.
+
+    Missing schedule config means no users are scheduled and therefore
+    preserves legacy v1.3.x behavior.
+    """
+    if path is None:
+        path = SCHEDULE_CONFIG
+    path = Path(path)
+
+    if limits is None:
+        _, limits, _ = load_config(config_path)
+
+    try:
+        raw_lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ChildTimeError(f"Cannot read {path}: {exc}") from exc
+
+    policy = {}
+    current_user = None
+
+    for raw in raw_lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+
+        if line.startswith("[") and line.endswith("]"):
+            username = line[1:-1].strip()
+            if not username:
+                raise ChildTimeError(f"Empty schedule section in {path}")
+            validate_username(username, require_local=False)
+            if username not in limits:
+                raise ChildTimeError(
+                    f"Scheduled user is not configured in daily policy: {username}"
+                )
+            if username in policy:
+                raise ChildTimeError(
+                    f"Duplicate schedule section in {path}: {username}"
+                )
+            policy[username] = []
+            current_user = username
+            continue
+
+        if current_user is None:
+            raise ChildTimeError(
+                f"Schedule entry appears before a user section in {path}: {raw}"
+            )
+
+        if "=" not in line:
+            raise ChildTimeError(f"Invalid schedule line in {path}: {raw}")
+
+        window_raw, quota_raw = (part.strip() for part in line.split("=", 1))
+        match = re.fullmatch(
+            r"(?P<start>\d{1,2}:\d{2})-(?P<end>\d{1,2}:\d{2})",
+            window_raw,
+        )
+        if not match:
+            raise ChildTimeError(f"Invalid schedule slot in {path}: {window_raw}")
+
+        start_text, start_minute = _clock_to_minute(match.group("start"))
+        end_text, end_minute = _clock_to_minute(match.group("end"))
+
+        if start_minute >= end_minute:
+            raise ChildTimeError(
+                f"Schedule slot start must be earlier than end: {window_raw}"
+            )
+
+        try:
+            quota_seconds = int(quota_raw)
+        except ValueError as exc:
+            raise ChildTimeError(
+                f"Invalid scheduled quota for {current_user}: {quota_raw}"
+            ) from exc
+
+        if quota_seconds <= 0:
+            raise ChildTimeError("Scheduled quota must be greater than zero.")
+
+        wall_seconds = (end_minute - start_minute) * 60
+        if quota_seconds > wall_seconds:
+            raise ChildTimeError(
+                f"Scheduled quota exceeds slot duration: {window_raw}"
+            )
+
+        slot = ScheduledSlot(
+            username=current_user,
+            start_minute=start_minute,
+            end_minute=end_minute,
+            quota_seconds=quota_seconds,
+            slot_id=f"{start_text}-{end_text}",
+        )
+        policy[current_user].append(slot)
+
+    for username, slots in policy.items():
+        slots.sort(key=lambda item: (item.start_minute, item.end_minute))
+
+        previous = None
+        for slot in slots:
+            if previous is not None and slot.start_minute < previous.end_minute:
+                raise ChildTimeError(
+                    f"Overlapping schedule slots for {username}: "
+                    f"{previous.slot_id} and {slot.slot_id}"
+                )
+            previous = slot
+
+        scheduled_total = sum(slot.quota_seconds for slot in slots)
+        if scheduled_total > limits[username]:
+            raise ChildTimeError(
+                f"Scheduled quota for {username} exceeds daily limit."
+            )
+
+    return policy
+
+
+def resolve_active_slot(slots, minute_of_day):
+    """Return the active slot using START-inclusive, END-exclusive semantics."""
+    for slot in slots:
+        if slot.start_minute <= minute_of_day < slot.end_minute:
+            return slot
+    return None
+
+
+def resolve_next_slot(slots, minute_of_day):
+    """Return the next slot whose START is later than minute_of_day."""
+    for slot in slots:
+        if slot.start_minute > minute_of_day:
+            return slot
+    return None
 
 
 def read_used(username, day=None, state_dir=None):
