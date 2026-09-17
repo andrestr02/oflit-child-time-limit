@@ -83,16 +83,64 @@ def require_root():
 
 def print_status(selected=None):
     rows = core.status_rows(selected)
+
     print(f"OFLIT Child Time Limit — {today()}")
     print()
-    print(f"{'USER':<20} {'USED':>10} {'REMAINING':>10} {'LIMIT':>10} {'STATUS':>10}")
+    print(
+        f"{'USER':<20} {'USED':>10} {'REMAINING':>10} "
+        f"{'LIMIT':>10} {'STATUS':>10}"
+    )
     print("-" * 66)
+
+    try:
+        schedules = core.load_schedule_policy()
+    except core.ChildTimeError:
+        schedules = {}
+
+    now = core.local_now()
+    minute_of_day = now.hour * 60 + now.minute
+
     for row in rows:
         print(
-            f"{row.username:<20} {fmt(row.used):>10} {fmt(row.remaining):>10} "
-            f"{fmt(row.limit):>10} {row.status:>10}"
+            f"{row.username:<20} "
+            f"{fmt(row.used):>10} "
+            f"{fmt(row.remaining):>10} "
+            f"{fmt(row.limit):>10} "
+            f"{row.status:>10}"
         )
 
+        slots = schedules.get(row.username, [])
+        if not slots:
+            continue
+
+        slot_usage = core.read_schedule_used(
+            row.username,
+            slots,
+        )
+
+        scheduled_status = core.scheduled_status_detail(
+            slots,
+            slot_usage,
+            minute_of_day,
+        )
+
+        if scheduled_status.slot_id is None:
+            print("  Schedule : no more slots today")
+            continue
+
+        label = (
+            "current"
+            if scheduled_status.mode in ("ACTIVE", "EXHAUSTED")
+            else "next"
+        )
+
+        print(
+            f"  Schedule : {label} "
+            f"{scheduled_status.slot_id} "
+            f"[{scheduled_status.mode}] "
+            f"used={fmt(scheduled_status.used)} "
+            f"remaining={fmt(scheduled_status.remaining)}"
+        )
 
 def _print_mutation_result(result):
     print(f"User       : {result.username}")
@@ -157,6 +205,17 @@ def command_subtract(args):
 
 def command_until(args):
     now = core.local_now()
+
+    try:
+        schedules = core.load_schedule_policy()
+    except ChildTimeError:
+        schedules = {}
+
+    if schedules.get(args.username):
+        raise ChildTimeError(
+            "'until' is not supported for users with scheduled quotas."
+        )
+
     target = core.parse_clock(args.clock, now=now)
     seconds_until = int((target - now).total_seconds())
     result = core.apply_limit_transaction(

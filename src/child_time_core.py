@@ -52,6 +52,13 @@ class StatusRow(NamedTuple):
     status: str
 
 
+class ScheduledStatusDetail(NamedTuple):
+    mode: str
+    slot_id: Optional[str]
+    used: int
+    remaining: int
+
+
 class LimitMutationResult(NamedTuple):
     username: str
     used: int
@@ -434,6 +441,92 @@ def resolve_next_slot(slots, minute_of_day):
     return None
 
 
+def scheduled_status_detail(
+    slots,
+    slot_usage,
+    minute_of_day,
+):
+    """Return current/next scheduled quota status for display."""
+    try:
+        minute_of_day = int(minute_of_day)
+    except (TypeError, ValueError) as exc:
+        raise ChildTimeError(
+            "Minute of day must be an integer."
+        ) from exc
+
+    if minute_of_day < 0 or minute_of_day > 1439:
+        raise ChildTimeError(
+            "Minute of day must be between 0 and 1439."
+        )
+
+    active = resolve_active_slot(
+        slots,
+        minute_of_day,
+    )
+
+    if active is not None:
+        used = int(
+            slot_usage.get(active.slot_id, 0)
+        )
+
+        if used < 0 or used > active.quota_seconds:
+            raise ChildTimeError(
+                f"Invalid scheduled usage for slot: "
+                f"{active.slot_id}"
+            )
+
+        remaining = max(
+            0,
+            active.quota_seconds - used,
+        )
+
+        mode = (
+            "EXHAUSTED"
+            if remaining == 0
+            else "ACTIVE"
+        )
+
+        return ScheduledStatusDetail(
+            mode,
+            active.slot_id,
+            used,
+            remaining,
+        )
+
+    next_slot = resolve_next_slot(
+        slots,
+        minute_of_day,
+    )
+
+    if next_slot is not None:
+        used = int(
+            slot_usage.get(next_slot.slot_id, 0)
+        )
+
+        if used < 0 or used > next_slot.quota_seconds:
+            raise ChildTimeError(
+                f"Invalid scheduled usage for slot: "
+                f"{next_slot.slot_id}"
+            )
+
+        return ScheduledStatusDetail(
+            "NEXT",
+            next_slot.slot_id,
+            used,
+            max(
+                0,
+                next_slot.quota_seconds - used,
+            ),
+        )
+
+    return ScheduledStatusDetail(
+        "DONE",
+        None,
+        0,
+        0,
+    )
+
+
 def read_schedule_used(
     username,
     slots,
@@ -714,8 +807,15 @@ def confirm_reduction(username, used, old_limit, new_limit, force=False):
     )
 
 
-def status_rows(selected=None, config_path=None, state_dir=None):
+def status_rows(
+    selected=None,
+    config_path=None,
+    state_dir=None,
+    schedule_path=None,
+    schedule_state_dir=None,
+):
     _, limits, _ = load_config(config_path)
+
     if selected is not None:
         if selected not in limits:
             raise ChildTimeError(f"User is not configured: {selected}")
@@ -723,15 +823,49 @@ def status_rows(selected=None, config_path=None, state_dir=None):
     else:
         names = sorted(limits)
 
+    schedules = load_schedule_policy(
+        path=schedule_path,
+        limits=limits,
+    )
+
     rows = []
+
     for username in names:
         limit = limits[username]
-        used = read_used(username, state_dir=state_dir)
+        legacy_used = read_used(
+            username,
+            state_dir=state_dir,
+        )
+
+        slots = schedules.get(username, [])
+
+        if slots:
+            slot_usage = read_schedule_used(
+                username,
+                slots,
+                state_dir=schedule_state_dir,
+            )
+            used = reconcile_daily_used(
+                legacy_used,
+                slot_usage,
+            )
+        else:
+            used = legacy_used
+
         remaining = max(0, limit - used)
         status = "EXHAUSTED" if used >= limit else "AVAILABLE"
-        rows.append(StatusRow(username, used, remaining, limit, status))
-    return rows
 
+        rows.append(
+            StatusRow(
+                username,
+                used,
+                remaining,
+                limit,
+                status,
+            )
+        )
+
+    return rows
 
 def apply_limit_transaction(
     username,
@@ -768,6 +902,16 @@ def apply_limit_transaction(
         )
         if new_limit <= 0:
             raise ChildTimeError("Limit must be greater than zero.")
+
+        candidate_limits = dict(limits)
+        candidate_limits[username] = new_limit
+        schedules = load_schedule_policy(limits=candidate_limits)
+        validate_scheduled_daily_ceiling(
+            username,
+            new_limit,
+            schedules,
+        )
+
         confirm_reduction(username, used, old_limit, new_limit, force=force)
         old_limit, new_limit = _atomic_update_limit_locked(
             username, new_limit, config_path
@@ -782,6 +926,32 @@ def apply_limit_transaction(
         remaining=remaining,
         reason=reason,
     )
+
+
+
+def validate_scheduled_daily_ceiling(username, candidate_limit, schedules):
+    """Reject a daily ceiling below the user's aggregate scheduled quota."""
+    validate_username(username)
+
+    try:
+        candidate_limit = int(candidate_limit)
+    except (TypeError, ValueError):
+        raise ChildTimeError("Daily limit must be an integer.")
+
+    if candidate_limit <= 0:
+        raise ChildTimeError("Daily limit must be greater than zero.")
+
+    slots = schedules.get(username, [])
+    if not slots:
+        return
+
+    aggregate = sum(slot.quota_seconds for slot in slots)
+
+    if candidate_limit < aggregate:
+        raise ChildTimeError(
+            f"Daily limit for {username} cannot be below scheduled quota "
+            f"aggregate ({aggregate} seconds)."
+        )
 
 
 class LoginEligibility(NamedTuple):
