@@ -31,6 +31,7 @@ SCHEDULE_CONFIG = Path("/etc/child-time-schedule.conf")
 DEFAULT_ACCESS_START = "09:00"
 DEFAULT_ACCESS_END = "17:00"
 STATE_DIR = Path("/var/lib/child-time-limit")
+SCHEDULE_STATE_DIR = STATE_DIR / "schedules"
 
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]*[$]?$", re.IGNORECASE)
 DURATION_RE = re.compile(
@@ -431,6 +432,180 @@ def resolve_next_slot(slots, minute_of_day):
         if slot.start_minute > minute_of_day:
             return slot
     return None
+
+
+def read_schedule_used(
+    username,
+    slots,
+    day=None,
+    state_dir=None,
+):
+    """Read persisted per-slot usage for one scheduled user.
+
+    Missing or stale state represents zero usage for the requested day.
+    State entries that no longer exist in the current policy are ignored,
+    so changing a slot never manufactures usage for a different slot.
+    """
+    if state_dir is None:
+        state_dir = SCHEDULE_STATE_DIR
+
+    day = day or today()
+    path = Path(state_dir) / f"{username}.state"
+    known_slots = {slot.slot_id for slot in slots}
+    usage = {slot.slot_id: 0 for slot in slots}
+
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        return usage
+    except OSError as exc:
+        raise ChildTimeError(f"Cannot read {path}: {exc}") from exc
+
+    meaningful = [
+        raw.strip()
+        for raw in lines
+        if raw.strip() and not raw.strip().startswith("#")
+    ]
+
+    if not meaningful or meaningful[0] != day:
+        return usage
+
+    seen = set()
+    for line in meaningful[1:]:
+        if "=" not in line:
+            raise ChildTimeError(f"Invalid scheduled state in {path}: {line}")
+
+        slot_id, used_raw = (part.strip() for part in line.split("=", 1))
+
+        if slot_id in seen:
+            raise ChildTimeError(
+                f"Duplicate scheduled state slot in {path}: {slot_id}"
+            )
+        seen.add(slot_id)
+
+        try:
+            used = int(used_raw)
+        except ValueError as exc:
+            raise ChildTimeError(
+                f"Invalid scheduled usage in {path}: {used_raw}"
+            ) from exc
+
+        if used < 0:
+            raise ChildTimeError(
+                f"Scheduled usage cannot be negative in {path}: {slot_id}"
+            )
+
+        if slot_id in known_slots:
+            usage[slot_id] = used
+
+    return usage
+
+
+def write_schedule_used(
+    username,
+    slots,
+    slot_usage,
+    day=None,
+    state_dir=None,
+):
+    """Atomically persist current per-slot usage for one scheduled user."""
+    if state_dir is None:
+        state_dir = SCHEDULE_STATE_DIR
+
+    day = day or today()
+    state_dir = Path(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / f"{username}.state"
+
+    known_slots = {slot.slot_id for slot in slots}
+    supplied_slots = set(slot_usage)
+
+    unknown = supplied_slots - known_slots
+    if unknown:
+        raise ChildTimeError(
+            f"Unknown scheduled state slot for {username}: {sorted(unknown)[0]}"
+        )
+
+    normalized = {}
+    for slot in slots:
+        raw_used = slot_usage.get(slot.slot_id, 0)
+        try:
+            used = int(raw_used)
+        except (TypeError, ValueError) as exc:
+            raise ChildTimeError(
+                f"Invalid scheduled usage for {username}: {slot.slot_id}"
+            ) from exc
+
+        if used < 0:
+            raise ChildTimeError(
+                f"Scheduled usage cannot be negative: {slot.slot_id}"
+            )
+
+        if used > slot.quota_seconds:
+            raise ChildTimeError(
+                f"Scheduled usage exceeds slot quota: {slot.slot_id}"
+            )
+
+        normalized[slot.slot_id] = used
+
+    payload = day + "\n"
+    payload += "".join(
+        f"{slot.slot_id}={normalized[slot.slot_id]}\n"
+        for slot in slots
+    )
+
+    fd = None
+    temporary = None
+
+    try:
+        fd, temporary = tempfile.mkstemp(
+            prefix=path.name + ".",
+            dir=str(state_dir),
+        )
+
+        with os.fdopen(fd, "w") as handle:
+            fd = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        temporary = None
+
+        dir_fd = os.open(state_dir, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    except OSError as exc:
+        raise ChildTimeError(f"Cannot update {path}: {exc}") from exc
+
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    return normalized
+
+
+def scheduled_total_used(slot_usage):
+    """Return total persisted usage represented by current scheduled slots."""
+    return sum(max(0, int(value)) for value in slot_usage.values())
+
+
+def reconcile_daily_used(legacy_used, slot_usage):
+    """Never let recovery report less usage than either persisted view."""
+    return max(
+        max(0, int(legacy_used)),
+        scheduled_total_used(slot_usage),
+    )
 
 
 def read_used(username, day=None, state_dir=None):
