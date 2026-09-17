@@ -59,13 +59,6 @@ def within_access_window(now):
     return start <= current < end
 
 
-os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-
-# Only one enforcer instance may run at a time.
-lock = open(LOCK_FILE, "w")
-fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-
 def local_day():
     return datetime.now().astimezone().date().isoformat()
 
@@ -177,58 +170,72 @@ def terminate(username):
     )
 
 
-limits = load_limits()
-previous_active = active_graphical_users(limits)
-previous_tick = time.monotonic()
-usage_cache = {}
-cache_day = local_day()
 
-while True:
-    time.sleep(POLL_SECONDS)
 
-    now = time.monotonic()
-    elapsed = max(0.0, now - previous_tick)
-    previous_tick = now
+def main():
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
 
-    day = local_day()
-    if day != cache_day:
-        usage_cache.clear()
-        cache_day = day
+    # Only one enforcer instance may run at a time.
+    lock = open(LOCK_FILE, "w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
 
     limits = load_limits()
-    current_active = active_graphical_users(limits)
+    previous_active = active_graphical_users(limits)
+    previous_tick = time.monotonic()
+    usage_cache = {}
+    cache_day = local_day()
 
-    # Charge the interval to users who were active at the start of it.
-    # A login/logout transition can therefore differ by at most one poll.
-    for username in previous_active:
-        if username not in limits:
-            continue
+    while True:
+        time.sleep(POLL_SECONDS)
 
-        limit = limits[username]
+        now = time.monotonic()
+        elapsed = max(0.0, now - previous_tick)
+        previous_tick = now
 
-        if username not in usage_cache:
-            usage_cache[username] = read_state(username, day)
+        day = local_day()
+        if day != cache_day:
+            usage_cache.clear()
+            cache_day = day
 
-        used = usage_cache[username]
+        limits = load_limits()
+        current_active = active_graphical_users(limits)
 
-        if used >= limit:
-            # A policy reduction must never erase already-consumed usage.
-            # Keep the historical state as-is and enforce the new lower limit.
-            terminate(username)
-            continue
+        # Charge the interval to users who were active at the start of it.
+        # A login/logout transition can therefore differ by at most one poll.
+        for username in previous_active:
+            if username not in limits:
+                continue
 
-        used = min(float(limit), used + elapsed)
-        usage_cache[username] = used
+            limit = limits[username]
 
-        # Persist before enforcement so reboot cannot restore consumed time.
-        write_state(username, day, used)
+            if username not in usage_cache:
+                usage_cache[username] = read_state(username, day)
 
-        if used >= limit:
-            terminate(username)
+            used = usage_cache[username]
 
-    wall_now = datetime.now().astimezone()
-    if not within_access_window(wall_now):
-        for username in current_active:
-            terminate(username)
+            if used >= limit:
+                # A policy reduction must never erase already-consumed usage.
+                # Keep the historical state as-is and enforce the new lower limit.
+                terminate(username)
+                continue
 
-    previous_active = current_active
+            used = min(float(limit), used + elapsed)
+            usage_cache[username] = used
+
+            # Persist before enforcement so reboot cannot restore consumed time.
+            write_state(username, day, used)
+
+            if used >= limit:
+                terminate(username)
+
+        wall_now = datetime.now().astimezone()
+        if not within_access_window(wall_now):
+            for username in current_active:
+                terminate(username)
+
+        previous_active = current_active
+
+
+if __name__ == "__main__":
+    main()

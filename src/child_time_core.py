@@ -850,3 +850,207 @@ def evaluate_login_eligibility(
         return LoginEligibility(False, "slot_exhausted", slot)
 
     return LoginEligibility(True, "allowed", slot)
+
+
+def scheduled_interval_charge(slot, start_second, end_second):
+    """Return the portion of a wall-clock interval inside one scheduled slot.
+
+    The interval and slot use START-inclusive / END-exclusive semantics.
+    Values are seconds since local midnight.
+    """
+    try:
+        start_second = float(start_second)
+        end_second = float(end_second)
+    except (TypeError, ValueError) as exc:
+        raise ChildTimeError("Invalid scheduled accounting interval.") from exc
+
+    day_seconds = 24 * 60 * 60
+
+    if not 0 <= start_second <= day_seconds:
+        raise ChildTimeError("Interval start is outside the local day.")
+
+    if not 0 <= end_second <= day_seconds:
+        raise ChildTimeError("Interval end is outside the local day.")
+
+    if end_second < start_second:
+        raise ChildTimeError("Interval end cannot precede interval start.")
+
+    slot_start = slot.start_minute * 60
+    slot_end = slot.end_minute * 60
+
+    overlap_start = max(start_second, slot_start)
+    overlap_end = min(end_second, slot_end)
+
+    return max(0.0, overlap_end - overlap_start)
+
+
+class ScheduledChargeResult(NamedTuple):
+    charged_seconds: float
+    daily_used: float
+    slot_used: float
+    daily_exhausted: bool
+    slot_exhausted: bool
+
+
+def apply_scheduled_charge(
+    daily_limit,
+    daily_used,
+    slot,
+    slot_used,
+    charge_seconds,
+):
+    """Apply one active-use charge without performing persistence."""
+
+    try:
+        daily_limit = float(daily_limit)
+        daily_used = float(daily_used)
+        slot_used = float(slot_used)
+        charge_seconds = float(charge_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ChildTimeError("Invalid scheduled charge input.") from exc
+
+    if daily_limit <= 0:
+        raise ChildTimeError("Daily limit must be greater than zero.")
+
+    if daily_used < 0:
+        raise ChildTimeError("Daily usage cannot be negative.")
+
+    if slot_used < 0:
+        raise ChildTimeError("Scheduled usage cannot be negative.")
+
+    if charge_seconds < 0:
+        raise ChildTimeError("Scheduled charge cannot be negative.")
+
+    if slot_used > slot.quota_seconds:
+        raise ChildTimeError(
+            f"Scheduled usage exceeds slot quota: {slot.slot_id}"
+        )
+
+    daily_remaining = max(0.0, daily_limit - daily_used)
+    slot_remaining = max(0.0, slot.quota_seconds - slot_used)
+
+    charged = min(
+        charge_seconds,
+        daily_remaining,
+        slot_remaining,
+    )
+
+    new_daily_used = daily_used + charged
+    new_slot_used = slot_used + charged
+
+    return ScheduledChargeResult(
+        charged_seconds=charged,
+        daily_used=new_daily_used,
+        slot_used=new_slot_used,
+        daily_exhausted=new_daily_used >= daily_limit,
+        slot_exhausted=new_slot_used >= slot.quota_seconds,
+    )
+
+
+def persist_scheduled_accounting(*, write_slot, write_daily):
+    """Persist scheduled accounting in crash-safe order.
+
+    Slot state must become durable before the legacy daily compatibility
+    state. If slot persistence fails, daily persistence must not run.
+    """
+    write_slot()
+    write_daily()
+
+
+class ScheduledIntervalResult(NamedTuple):
+    charged_seconds: float
+    daily_used: float
+    slot_usage: dict
+    daily_exhausted: bool
+    slot_exhausted: bool
+
+
+def account_scheduled_interval(
+    *,
+    daily_limit,
+    daily_used,
+    slots,
+    slot_usage,
+    start_second,
+    end_second,
+):
+    """Account one wall-clock interval across scheduled slots."""
+
+    usage = dict(slot_usage)
+    current_daily = float(daily_used)
+    total_charged = 0.0
+    any_slot_exhausted = False
+
+    known_slot_ids = {slot.slot_id for slot in slots}
+
+    unknown = set(usage) - known_slot_ids
+    if unknown:
+        raise ChildTimeError(
+            "Scheduled usage contains unknown slot state."
+        )
+
+    for slot in slots:
+        current_slot_used = usage.get(slot.slot_id, 0.0)
+
+        interval_charge = scheduled_interval_charge(
+            slot,
+            start_second,
+            end_second,
+        )
+
+        result = apply_scheduled_charge(
+            daily_limit=daily_limit,
+            daily_used=current_daily,
+            slot=slot,
+            slot_used=current_slot_used,
+            charge_seconds=interval_charge,
+        )
+
+        usage[slot.slot_id] = result.slot_used
+        current_daily = result.daily_used
+        total_charged += result.charged_seconds
+
+        if interval_charge > 0 and result.slot_exhausted:
+            any_slot_exhausted = True
+
+        if result.daily_exhausted:
+            break
+
+    return ScheduledIntervalResult(
+        charged_seconds=total_charged,
+        daily_used=current_daily,
+        slot_usage=usage,
+        daily_exhausted=current_daily >= float(daily_limit),
+        slot_exhausted=any_slot_exhausted,
+    )
+
+
+class ScheduledEnforcementResult(NamedTuple):
+    terminate: bool
+    reason: str
+    slot: Optional[ScheduledSlot]
+
+
+def evaluate_scheduled_enforcement(
+    *,
+    daily_limit,
+    daily_used,
+    slots,
+    slot_usage,
+    minute_of_day,
+):
+    """Translate shared login eligibility into enforcer action."""
+
+    eligibility = evaluate_login_eligibility(
+        daily_limit=daily_limit,
+        daily_used=daily_used,
+        slots=slots,
+        slot_usage=slot_usage,
+        minute_of_day=minute_of_day,
+    )
+
+    return ScheduledEnforcementResult(
+        terminate=not eligibility.allowed,
+        reason=eligibility.reason,
+        slot=eligibility.slot,
+    )
