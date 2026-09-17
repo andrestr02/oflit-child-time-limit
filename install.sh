@@ -31,6 +31,7 @@ if ! find /usr/lib /lib -type f -name pam_exec.so -print -quit 2>/dev/null | gre
 fi
 
 install -d -m 0700 /var/lib/child-time-limit
+install -d -m 0700 /var/lib/child-time-limit/schedules
 install -d -m 0700 "$BACKUP_DIR"
 install -d -m 0755 /usr/local/lib/child-time-limit
 cp -a "$PAM_FILE" "$BACKUP_DIR/gdm-password.$STAMP"
@@ -56,6 +57,12 @@ if [[ ! -e /etc/child-time-access.conf ]]; then
   install -m 0600 "$ROOT_DIR/config/child-time-access.conf.example" /etc/child-time-access.conf
 else
   chmod 0600 /etc/child-time-access.conf
+fi
+
+if [[ ! -e /etc/child-time-schedule.conf ]]; then
+  install -m 0600 "$ROOT_DIR/config/child-time-schedule.conf.example" /etc/child-time-schedule.conf
+else
+  chmod 0600 /etc/child-time-schedule.conf
 fi
 
 if [[ ! -e /etc/child-time-limit.conf ]]; then

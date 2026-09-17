@@ -1,0 +1,17 @@
+# OFLIT Child Time Limit — Per-User Scheduled Quotas
+#
+# Scheduled quotas are optional.
+# Users without a section continue using the normal daily quota.
+#
+# Example:
+#
+# [azzahra]
+# 09:00-12:00=3600
+# 15:00-17:00=3600
+#
+# Rules:
+# - Same-day slots only; overnight slots are not supported.
+# - Slots for one user must not overlap.
+# - Slot quota is measured as active-use seconds.
+# - Unused quota does not carry over to another slot.
+# - Total slot quota must not exceed the user's daily quota.
