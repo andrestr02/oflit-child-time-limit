@@ -139,6 +139,78 @@ It is not intended to defend against a user with root access, physical disk writ
 
 Usage is deduplicated by username. Multiple active graphical sessions for the same configured username do not multiply the charged rate.
 
+## Weekly policy resolution
+
+A user's policy for a given day is resolved in one place, by the shared
+core, and consumed identically by all three front ends:
+
+```text
+/etc/child-time-limit.conf      base daily limit per user
+/etc/child-time-daily.conf      per-weekday daily limit overrides
+/etc/child-time-schedule.conf   weekly schedules ([DAYS/]HH:MM-HH:MM=quota)
+/etc/child-time-access.conf     global access window (outer guard)
+          |
+          v
+  load_effective_policy()
+          |
+          +--> effective_daily_limit(user, weekday)  -> this day's ceiling
+          +--> slots_for_weekday(slots, weekday)     -> this day's windows
+          |
+          v
+  evaluate_login_eligibility()  (PAM gate)
+  evaluate_scheduled_enforcement()  (daemon)
+```
+
+`child-time`, `child-time-login-check` and `child-time-enforcer` all
+call `effective_daily_limit` and `slots_for_weekday`. Neither runtime
+component reimplements weekday logic, so the policy an administrator
+inspects with `child-time limits` is the policy that is enforced.
+
+Weekdays use Python's `date.weekday()` indexing (0=Monday..6=Sunday)
+resolved from local system time — the same clock already used for the
+daily usage reset and the access window.
+
+### Per-slot usage state
+
+```text
+/var/lib/child-time-limit/USER.state            "<date> <seconds>"   day total
+/var/lib/child-time-limit/schedules/USER.state   "<date>\nID=seconds" per slot
+```
+
+Both are stamped with the local date, which is what makes the daily
+reset automatic: a stale date reads as zero usage rather than being
+rewritten.
+
+Only schedules that apply **today** are written to today's per-slot
+state, so a Friday-only counter does not appear in Saturday's file. A
+state entry whose identifier is not in the current policy is ignored on
+read, so changing a schedule never manufactures usage for a different
+one.
+
+The authoritative day total is
+`max(day_total, sum(today's per-slot counters))`. This is why logging
+out and back in, or restarting the service, cannot restore consumed
+time: whichever persisted view is larger wins.
+
+Persistence order is fixed: per-slot state must become durable
+**before** the day-total compatibility state. If the first write fails,
+the second does not run, so a crash can only ever under-report the day
+total relative to the slots — never over-grant time.
+
+### Failure posture
+
+| Situation | Behaviour |
+| --- | --- |
+| User not in `/etc/child-time-limit.conf` | allowed (administrators and the GDM greeter are never restricted) |
+| Daily limit config unreadable/malformed | fail **open**; nothing is enforced |
+| Schedule or weekday-limit file malformed, configured user | fail **closed** |
+| Per-slot usage state malformed, configured user | fail **closed** |
+| Polling interval crosses local midnight, scheduled user | not charged; session ended |
+
+The asymmetry is deliberate: an unparseable *global* config must not
+lock out an administrator, but an unparseable *child* policy must not
+silently grant unrestricted access.
+
 ## Why two layers?
 
 The daemon answers: "Should this currently running session be terminated?"

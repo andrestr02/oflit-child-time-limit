@@ -65,6 +65,12 @@ else
   chmod 0600 /etc/child-time-schedule.conf
 fi
 
+if [[ ! -e /etc/child-time-daily.conf ]]; then
+  install -m 0600 "$ROOT_DIR/config/child-time-daily.conf.example" /etc/child-time-daily.conf
+else
+  chmod 0600 /etc/child-time-daily.conf
+fi
+
 if [[ ! -e /etc/child-time-limit.conf ]]; then
   install -m 0600 "$ROOT_DIR/config/child-time-limit.conf.example" /etc/child-time-limit.conf
 else
@@ -102,6 +108,11 @@ NEXT STEPS:
      sudo child-time set child1 2h
      sudo child-time add child1 30m
 4. Policy changes are reloaded automatically; a service restart is not required.
+   Weekly schedules and per-weekday limits are managed the same way:
+     sudo child-time schedule add child1 --days mon-fri --start 15:00 --end 17:00 --quota 1h
+     sudo child-time set child1 2h --day fri
+     sudo child-time limits child1
+     sudo child-time validate
 5. Perform the 120-second acceptance test documented in docs/testing.md.
 
 The legacy read-only command `sudo child-time-status` remains installed for

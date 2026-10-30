@@ -13,6 +13,7 @@ STATE_DIR = Path("/var/lib/child-time-limit")
 
 ACCESS_CONFIG = Path("/etc/child-time-access.conf")
 SCHEDULE_CONFIG = Path("/etc/child-time-schedule.conf")
+DAILY_CONFIG = Path("/etc/child-time-daily.conf")
 SCHEDULE_STATE_DIR = STATE_DIR / "schedules"
 DEFAULT_ACCESS_START = (9, 0)
 DEFAULT_ACCESS_END = (17, 0)
@@ -97,6 +98,7 @@ def check_login(
     state_dir=STATE_DIR,
     schedule_config_path=SCHEDULE_CONFIG,
     schedule_state_dir=SCHEDULE_STATE_DIR,
+    daily_config_path=DAILY_CONFIG,
 ):
     # Preserve v1.3.1 fail-open behavior for broken daily configuration.
     try:
@@ -124,16 +126,33 @@ def check_login(
         used = 0
 
     minute_of_day = now.hour * 60 + now.minute
+    weekday = now.weekday()
 
     # Missing schedule config intentionally preserves v1.3.x behavior.
-    # For a configured child, malformed schedule/state is fail-closed:
-    # accounting uncertainty must never restore restricted time.
+    # For a configured child, malformed schedule/weekday-limit/state is
+    # fail-closed: accounting uncertainty must never restore restricted
+    # time, and an invalid policy must never grant unrestricted access.
     try:
+        overrides = core.load_daily_overrides(
+            path=Path(daily_config_path),
+            limits=limits,
+        )
         schedules = core.load_schedule_policy(
             path=Path(schedule_config_path),
             limits=limits,
+            overrides=overrides,
         )
-        slots = schedules.get(username, [])
+
+        # Today's weekday decides both the ceiling and which schedules
+        # apply, using the same core helpers the enforcer uses.
+        daily_limit = core.effective_daily_limit(
+            username,
+            weekday,
+            limits,
+            overrides,
+        ).seconds
+
+        slots = core.slots_for_weekday(schedules.get(username, []), weekday)
 
         if slots:
             slot_usage = core.read_schedule_used(
@@ -146,7 +165,7 @@ def check_login(
             slot_usage = {}
 
         return core.evaluate_login_eligibility(
-            daily_limit=limits[username],
+            daily_limit=daily_limit,
             daily_used=used,
             slots=slots,
             slot_usage=slot_usage,

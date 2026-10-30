@@ -178,6 +178,135 @@ inclusive-start/exclusive-end boundary semantics.
 Automated tests complement live PAM and graphical-session acceptance
 testing; they do not replace it.
 
+## Weekly schedules and per-weekday limits
+
+Weekly policy changes the *shape* of the quota, not the enforcement
+mechanism, so the checks above still apply. Verify these additionally.
+
+Set up a disposable, non-administrator test account with a short
+policy. Pick **today's** weekday for `DAY` so the test is immediate:
+
+```bash
+sudo child-time set testchild 4m
+sudo child-time schedule add testchild --days DAY --start HH:MM --end HH:MM --quota 2m
+sudo child-time limits testchild
+sudo child-time validate
+```
+
+Choose a window that starts a couple of minutes from now so you can
+observe the boundary.
+
+### 1. Weekday restriction
+
+```bash
+# A weekday the schedule does NOT cover must refuse login all day.
+sudo PAM_USER=testchild /usr/local/sbin/child-time-login-check; echo "exit=$?"
+```
+
+On a covered weekday inside the window, expect `exit=0`. On a
+non-covered weekday, or outside the window, expect `exit=1`.
+
+Then attempt a real graphical login and confirm it matches.
+
+### 2. Per-slot quota is independent
+
+Configure two windows on the same weekday, each with its own quota:
+
+```bash
+sudo child-time schedule add testchild --days DAY --start HH:MM --end HH:MM --quota 2m
+sudo child-time schedule add testchild --days DAY --start HH:MM --end HH:MM --quota 2m
+```
+
+Use the first window to exhaustion. Confirm:
+
+- the session is terminated when that window's quota runs out;
+- login is refused for the rest of that window;
+- login is allowed again when the **second** window opens, with its own
+  full quota;
+- unused time from the first window did **not** extend the second.
+
+Inspect the per-slot counters:
+
+```bash
+sudo cat /var/lib/child-time-limit/schedules/testchild.state
+```
+
+The first line is the local date; each following line is
+`SCHEDULE_ID=seconds`.
+
+### 3. Per-weekday daily limit
+
+```bash
+sudo child-time set testchild 6m --day DAY
+sudo child-time limits testchild
+```
+
+Confirm the chosen weekday reports the larger limit with source
+`override`, and every other weekday still reports `base`. Then confirm
+the day's total consumption stops at the override, even if a later
+window still has slot quota left.
+
+### 4. No bypass
+
+With quota partly consumed inside a window:
+
+```bash
+# Logout / login must not restore time.
+sudo loginctl terminate-user testchild
+# log back in, then re-check:
+sudo child-time status testchild
+
+# Service restart must not restore time.
+sudo systemctl restart child-time-enforcer.service
+sudo child-time status testchild
+```
+
+`USED` must not decrease in either case.
+
+### 5. Day rollover
+
+Confirm that after the local date changes, both the day total and every
+per-slot counter start from zero, and that the new day's applicable
+schedules are the ones for that new weekday. Verify a
+Friday-to-Saturday rollover specifically if the policy differs between
+them.
+
+### 6. Invalid policy fails closed
+
+```bash
+# Temporarily corrupt the schedule file for a CONFIGURED child.
+sudo cp /etc/child-time-schedule.conf /tmp/schedule.bak
+sudo sh -c 'printf "[testchild]\nfunday/09:00-10:00=600\n" > /etc/child-time-schedule.conf'
+sudo child-time validate; echo "exit=$?"
+sudo PAM_USER=testchild /usr/local/sbin/child-time-login-check; echo "exit=$?"
+```
+
+Expect `validate` to exit non-zero and the login check to exit `1`
+(denied). An active session for that child must be terminated.
+
+Confirm an **unconfigured** administrator account is still allowed:
+
+```bash
+sudo PAM_USER=youradminuser /usr/local/sbin/child-time-login-check; echo "exit=$?"
+```
+
+Expect `exit=0`.
+
+Restore immediately:
+
+```bash
+sudo cp /tmp/schedule.bak /etc/child-time-schedule.conf
+sudo child-time validate
+```
+
+### 7. Rejected changes do not alter configuration
+
+```bash
+sudo cp /etc/child-time-schedule.conf /tmp/before.conf
+sudo child-time schedule add testchild --days funday --start 09:00 --end 10:00 --quota 5m
+sudo diff /tmp/before.conf /etc/child-time-schedule.conf && echo "unchanged: OK"
+```
+
 ## Acceptance criteria
 
 A production deployment is accepted only when all of these are proven:
@@ -189,3 +318,17 @@ A production deployment is accepted only when all of these are proven:
 - the daemon starts automatically after reboot;
 - yesterday's exhausted state does not consume today's quota;
 - administrator accounts that are not configured remain unaffected.
+
+With weekly policy configured, additionally:
+
+- login is refused on a weekday with no applicable schedule;
+- login is refused outside every applicable window on a covered weekday;
+- each scheduled window enforces its own independent quota;
+- unused quota never carries between windows or between days;
+- a per-weekday limit override caps that whole day;
+- logout/login and a service restart never restore consumed time;
+- all counters reset at local midnight, including across a weekday
+  boundary where the policy differs;
+- an invalid schedule or weekday-limit file denies the configured child
+  rather than granting unrestricted access;
+- a rejected `child-time` command leaves configuration unchanged.

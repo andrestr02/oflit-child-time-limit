@@ -47,6 +47,9 @@ OFLIT Child Time Limit has been disabled and its PAM rule removed.
 
 For safety, these are intentionally preserved:
   /etc/child-time-limit.conf
+  /etc/child-time-access.conf
+  /etc/child-time-schedule.conf
+  /etc/child-time-daily.conf
   /var/lib/child-time-limit/
 
 After verifying that login works normally, you may delete them manually if you
