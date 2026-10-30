@@ -1,17 +1,46 @@
-# OFLIT Child Time Limit — Per-User Scheduled Quotas
+# OFLIT Child Time Limit — per-user weekly scheduled quotas
 #
 # Scheduled quotas are optional.
 # Users without a section continue using the normal daily quota.
 #
-# Example:
+# Manage this file with `child-time schedule`; you should not need to
+# edit it by hand:
+#
+#   child-time schedule list   USER
+#   child-time schedule add    USER --days DAYS --start HH:MM --end HH:MM --quota DURATION
+#   child-time schedule edit   USER SCHEDULE_ID [--days|--start|--end|--quota ...]
+#   child-time schedule remove USER SCHEDULE_ID
+#
+# Format
+# ------
+#   [DAYS/]HH:MM-HH:MM=SECONDS
+#
+# DAYS is a weekday expression. When omitted, the schedule applies on
+# every weekday and keeps the legacy `HH:MM-HH:MM` identifier, so
+# configurations written before weekday support keep working unchanged.
+#
+#   fri              one weekday
+#   mon-fri          an inclusive range
+#   sat,sun          a comma-separated list
+#   fri-mon          a range that wraps past Sunday (Fri, Sat, Sun, Mon)
+#   daily            every weekday (same as omitting DAYS)
+#   weekdays         mon-fri
+#   weekend          sat,sun
+#
+# Example — afternoons every day, plus a Friday morning slot:
 #
 # [azzahra]
-# 09:00-12:00=3600
 # 15:00-17:00=3600
+# fri/09:00-12:00=3600
 #
 # Rules:
 # - Same-day slots only; overnight slots are not supported.
-# - Slots for one user must not overlap.
+# - Slots that apply on the same weekday must not overlap.
 # - Slot quota is measured as active-use seconds.
-# - Unused quota does not carry over to another slot.
-# - Total slot quota must not exceed the user's daily quota.
+# - Slot quota must not exceed the slot's wall-clock length.
+# - Unused quota does not carry over to another slot or another day.
+# - For every weekday, the total quota of that day's slots must not
+#   exceed that day's effective daily limit (see child-time-daily.conf).
+# - Each slot's identifier is its canonical `[DAYS/]HH:MM-HH:MM` string.
+#   Changing a slot's days or window changes its identifier, and that
+#   slot's usage for today restarts from zero.

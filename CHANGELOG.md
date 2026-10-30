@@ -1,5 +1,97 @@
 # Changelog
 
+## v1.4.0 — 2026-10-30
+
+Generic weekly scheduling and per-weekday daily quota release.
+
+Weekly policy is fully administrator-configurable through `child-time`.
+No usernames, weekdays, access windows or quotas are hardcoded in
+application logic.
+
+### Added
+
+- **Weekly schedules.** A user may have any number of scheduled
+  windows, each restricted to chosen weekdays and each carrying its own
+  independent active-use quota.
+- **Weekday expressions** for `--days` / `--day` and on disk: single
+  days (`fri`), long names (`friday`), inclusive ranges (`mon-fri`),
+  ranges that wrap past Sunday (`fri-mon`), lists (`sat,sun`) and the
+  groups `daily` / `all` / `everyday` / `weekdays` / `weekend`. All
+  seven weekdays are supported, resolved from the local system weekday.
+- **Per-weekday daily limit overrides**, stored in a new
+  `/etc/child-time-daily.conf`, so a single weekday can allow more (or
+  less) total time than the base daily limit.
+- **Stable schedule identifiers.** Each schedule is addressed by its
+  canonical `[DAYS/]HH:MM-HH:MM` form, shown by `schedule list` and
+  accepted by `schedule edit` / `schedule remove`.
+- New CLI commands:
+  - `child-time schedule list USER`
+  - `child-time schedule add USER [--days DAYS] --start HH:MM --end HH:MM --quota DURATION`
+  - `child-time schedule edit USER SCHEDULE_ID [--days|--start|--end|--quota]`
+  - `child-time schedule remove USER SCHEDULE_ID`
+  - `child-time set USER DURATION --day DAY`
+  - `child-time limits USER` — the effective per-weekday policy
+  - `child-time validate` — validate every policy file, changing nothing
+- `child-time status` now reports today's applicable schedules and
+  flags a weekday limit override.
+- Shared core helpers used by the CLI, the PAM login gate and the
+  enforcer alike: `parse_weekday_expression`, `format_weekday_set`,
+  `schedule_slot_id`, `slots_for_weekday`, `load_daily_overrides`,
+  `effective_daily_limit`, `load_effective_policy`,
+  `weekly_policy_view`, `validate_weekly_schedule`,
+  `validate_daily_override_ceiling`, `validate_policy`, and the
+  `add_schedule` / `edit_schedule` / `remove_schedule` /
+  `apply_daily_override_transaction` mutations.
+- `config/child-time-daily.conf.example`, installed only when
+  `/etc/child-time-daily.conf` does not already exist.
+- Deployment tooling in `scripts/`: `child-time-backup.sh`,
+  `child-time-preflight.sh`, `child-time-verify.sh` and
+  `child-time-restore.sh`.
+- `docs/scheduling.md` (configuration reference, examples, migration)
+  and `docs/deployment.md` (staged deployment and rollback).
+- 130 new deterministic tests covering the weekday engine, CLI
+  mutations, atomicity under failure, genuinely concurrent processes,
+  midnight and Friday-to-Saturday transitions, logout/login and service
+  restart, invalid policy, legacy configurations, packaging and docs.
+
+### Changed
+
+- Schedule validation is now **per weekday**: two schedules conflict
+  only on a day where both apply, and a day's total scheduled quota is
+  checked against that day's effective daily limit.
+- `child-time set USER DURATION` validates only weekdays that actually
+  fall back to the base limit; a weekday carrying its own override is
+  validated when that override changes.
+- `status_rows` resolves the weekday once and uses it for both the
+  effective limit and the applicable schedules.
+- `StatusRow` gained `weekday` and `limit_source`; `ScheduledSlot`
+  gained `days`. Both are appended with defaults, so existing
+  positional construction is unaffected.
+- The enforcer and the PAM login check resolve the day's ceiling and
+  windows through the shared core instead of reading the limit directly.
+- A malformed `/etc/child-time-daily.conf` is treated exactly like a
+  malformed schedule file: fail-closed for configured children.
+
+### Fixed
+
+- The enforcer defined `ScheduledRuntimeResult` and
+  `process_scheduled_interval` twice, verbatim. Removed the duplicate.
+- `apply_daily_override_transaction` read usage from the production
+  state directory regardless of the caller's `state_dir`.
+
+### Compatibility
+
+- `/etc/child-time-limit.conf` is not modified by weekly scheduling.
+- Schedule entries with no weekday prefix are read as all-week
+  schedules and keep their original `HH:MM-HH:MM` identifiers, so
+  existing per-slot usage state stays correctly attributed.
+- Users with no schedules keep plain daily-quota behaviour on all seven
+  days.
+- Existing usage history is never modified by the upgrade.
+- All pre-existing CLI commands behave as before.
+- No migration step is required.
+
+
 ## v1.3.1 — 2026-09-17
 
 ### Fixed

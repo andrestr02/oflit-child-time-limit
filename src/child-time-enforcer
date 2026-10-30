@@ -148,12 +148,24 @@ def write_state(username, day, used):
 
 
 def active_graphical_users(limits):
-    result = subprocess.run(
-        ["loginctl", "list-sessions", "--no-legend"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    # A hung or failing loginctl must not be read as "no active sessions",
+    # which would silently stop charging usage. Both queries are time-bound
+    # and raise instead, so the caller can fail closed.
+    try:
+        result = subprocess.run(
+            ["loginctl", "list-sessions", "--no-legend"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("loginctl list-sessions timed out") from exc
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"loginctl list-sessions failed: {result.stderr.strip()}"
+        )
 
     users = set()
 
@@ -163,20 +175,32 @@ def active_graphical_users(limits):
             continue
 
         session = fields[0]
-        details = subprocess.run(
-            [
-                "loginctl",
-                "show-session",
-                session,
-                "-p", "Name",
-                "-p", "Type",
-                "-p", "Class",
-                "-p", "Active",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+
+        try:
+            details = subprocess.run(
+                [
+                    "loginctl",
+                    "show-session",
+                    session,
+                    "-p", "Name",
+                    "-p", "Type",
+                    "-p", "Class",
+                    "-p", "Active",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"loginctl show-session {session} timed out"
+            ) from exc
+
+        if details.returncode != 0:
+            raise RuntimeError(
+                f"loginctl show-session {session} failed"
+            )
 
         info = {}
         for item in details.stdout.splitlines():
@@ -205,66 +229,6 @@ def terminate(username):
     )
 
 
-
-
-class ScheduledRuntimeResult:
-    def __init__(
-        self,
-        *,
-        charged_seconds,
-        daily_used,
-        slot_usage,
-        terminate,
-        reason,
-    ):
-        self.charged_seconds = charged_seconds
-        self.daily_used = daily_used
-        self.slot_usage = slot_usage
-        self.terminate = terminate
-        self.reason = reason
-
-
-def process_scheduled_interval(
-    *,
-    daily_limit,
-    legacy_used,
-    slots,
-    slot_usage,
-    start_second,
-    end_second,
-    minute_of_day,
-):
-    """Account one scheduled-user interval and decide enforcement."""
-
-    reconciled_daily = core.reconcile_daily_used(
-        legacy_used,
-        slot_usage,
-    )
-
-    accounting = core.account_scheduled_interval(
-        daily_limit=daily_limit,
-        daily_used=reconciled_daily,
-        slots=slots,
-        slot_usage=slot_usage,
-        start_second=start_second,
-        end_second=end_second,
-    )
-
-    enforcement = core.evaluate_scheduled_enforcement(
-        daily_limit=daily_limit,
-        daily_used=accounting.daily_used,
-        slots=slots,
-        slot_usage=accounting.slot_usage,
-        minute_of_day=minute_of_day,
-    )
-
-    return ScheduledRuntimeResult(
-        charged_seconds=accounting.charged_seconds,
-        daily_used=accounting.daily_used,
-        slot_usage=accounting.slot_usage,
-        terminate=enforcement.terminate,
-        reason=enforcement.reason,
-    )
 
 
 class ScheduledRuntimeResult:
@@ -358,14 +322,28 @@ def main():
             cache_day = day
 
         limits = load_limits()
-        current_active = active_graphical_users(limits)
 
         try:
-            schedule_policy = core.load_schedule_policy(limits=limits)
+            current_active = active_graphical_users(limits)
+        except RuntimeError:
+            # Fail closed: if logind/loginctl is briefly unavailable, keep
+            # the previously active users so their time keeps being charged
+            # instead of silently pausing enforcement.
+            current_active = set(previous_active)
+
+        try:
+            daily_overrides = core.load_daily_overrides(limits=limits)
+            schedule_policy = core.load_schedule_policy(
+                limits=limits,
+                overrides=daily_overrides,
+            )
             schedule_policy_error = False
         except core.ChildTimeError:
             # Daily-only users retain legacy behaviour. Configured children
             # cannot safely use scheduled policy while that policy is broken.
+            # A broken weekday-limit file is treated the same way: an invalid
+            # policy must never widen access.
+            daily_overrides = {}
             schedule_policy = {}
             schedule_policy_error = True
 
@@ -389,6 +367,7 @@ def main():
             end_second = None
 
         minute_of_day = wall_now.hour * 60 + wall_now.minute
+        weekday = wall_now.weekday()
 
         # Charge the interval to users who were active at the start of it.
         # Legacy users retain v1.3.x monotonic accounting. Scheduled users
@@ -397,13 +376,31 @@ def main():
             if username not in limits:
                 continue
 
-            limit = limits[username]
+            try:
+                # The weekday override, when present, is this day's ceiling.
+                limit = core.effective_daily_limit(
+                    username,
+                    weekday,
+                    limits,
+                    daily_overrides,
+                ).seconds
+
+                # Only schedules that apply today can restrict or charge
+                # today, and they are the only slot state written today.
+                slots = core.slots_for_weekday(
+                    schedule_policy.get(username, []),
+                    weekday,
+                )
+            except core.ChildTimeError:
+                # A configured child whose effective policy cannot be
+                # resolved fails closed.
+                terminate(username)
+                continue
 
             if username not in usage_cache:
                 usage_cache[username] = read_state(username, day)
 
             legacy_used = usage_cache[username]
-            slots = schedule_policy.get(username, [])
 
             if not slots:
                 if schedule_policy_error:

@@ -1,0 +1,31 @@
+# OFLIT Child Time Limit — per-weekday daily limit overrides
+#
+# Overrides are optional. A user with no section here uses the single
+# daily limit from /etc/child-time-limit.conf on every weekday, which
+# is the behaviour of every release before weekday support.
+#
+# Manage this file with the CLI; you should not need to edit it by hand:
+#
+#   child-time set USER DURATION --day DAY   # override one weekday
+#   child-time set USER DURATION             # change the base limit
+#   child-time limits USER                   # inspect the effective policy
+#
+# Format
+# ------
+#   DAYS=SECONDS
+#
+# DAYS accepts the same weekday expressions as child-time-schedule.conf
+# (fri | mon-fri | sat,sun | weekend | daily ...). Every weekday the
+# expression selects takes SECONDS as that day's total daily limit.
+#
+# Example — 1 hour on most days (from child-time-limit.conf) but
+# 2 hours on Friday:
+#
+# [azzahra]
+# fri=7200
+#
+# Rules:
+# - A weekday override must be greater than zero.
+# - A weekday override must not be below the total scheduled quota of
+#   that same weekday.
+# - A weekday may be listed only once per user.

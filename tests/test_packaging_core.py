@@ -12,7 +12,22 @@ class CorePackagingTests(unittest.TestCase):
     def test_version_file_has_a_real_trailing_newline_not_an_escaped_literal(self):
         raw = (ROOT / "VERSION").read_bytes()
         self.assertNotIn(b"\\n", raw)
-        self.assertEqual(raw, b"1.3.1\n")
+        self.assertTrue(raw.endswith(b"\n"), raw)
+        self.assertEqual(raw.count(b"\n"), 1, raw)
+        self.assertRegex(raw.decode().strip(), r"^\d+\.\d+\.\d+$")
+
+    def test_version_matches_the_newest_changelog_entry(self):
+        """Keeps VERSION honest without pinning a literal in two places."""
+        import re
+
+        version = (ROOT / "VERSION").read_text().strip()
+        changelog = (ROOT / "CHANGELOG.md").read_text()
+
+        match = re.search(
+            r"^## \[?v?(\d+\.\d+\.\d+)\]?", changelog, re.MULTILINE
+        )
+        self.assertIsNotNone(match, "no version heading found in CHANGELOG.md")
+        self.assertEqual(version, match.group(1))
 
     def test_installer_creates_default_access_config_on_fresh_install(self):
         installer = (ROOT / "install.sh").read_text()

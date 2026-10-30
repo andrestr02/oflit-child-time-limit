@@ -70,6 +70,21 @@ status_rows = core.status_rows
 load_access_window = core.load_access_window
 atomic_update_access_window = core.atomic_update_access_window
 apply_limit_transaction = core.apply_limit_transaction
+load_schedule_policy = core.load_schedule_policy
+load_daily_overrides = core.load_daily_overrides
+load_effective_policy = core.load_effective_policy
+effective_daily_limit = core.effective_daily_limit
+slots_for_weekday = core.slots_for_weekday
+parse_weekday = core.parse_weekday
+parse_weekday_expression = core.parse_weekday_expression
+format_weekday_set = core.format_weekday_set
+add_schedule = core.add_schedule
+edit_schedule = core.edit_schedule
+remove_schedule = core.remove_schedule
+apply_daily_override_transaction = core.apply_daily_override_transaction
+weekly_policy_view = core.weekly_policy_view
+validate_policy = core.validate_policy
+WEEKDAY_NAMES = core.WEEKDAY_NAMES
 local_now = core.local_now
 today = core.today
 fmt = core.fmt
@@ -99,6 +114,7 @@ def print_status(selected=None):
 
     now = core.local_now()
     minute_of_day = now.hour * 60 + now.minute
+    weekday = now.weekday()
 
     for row in rows:
         print(
@@ -109,7 +125,18 @@ def print_status(selected=None):
             f"{row.status:>10}"
         )
 
-        slots = schedules.get(row.username, [])
+        if row.limit_source == "override":
+            print(
+                f"  Limit    : {core.WEEKDAY_NAMES[weekday]} override "
+                f"{human(row.limit)}"
+            )
+
+        # Only today's schedules are shown, because only today's
+        # schedules are enforced today.
+        slots = core.slots_for_weekday(
+            schedules.get(row.username, []),
+            weekday,
+        )
         if not slots:
             continue
 
@@ -167,12 +194,175 @@ def command_window(args):
 
 
 def command_set(args):
-    result = core.apply_limit_transaction(
+    """Set a user's daily limit, for every day or for one weekday."""
+    day = getattr(args, "day", None)
+
+    if day is None:
+        result = core.apply_limit_transaction(
+            args.username,
+            core.parse_duration(args.duration),
+            force=args.force,
+        )
+        _print_mutation_result(result)
+        return
+
+    weekday = core.parse_weekday(day)
+    result = core.apply_daily_override_transaction(
         args.username,
+        weekday,
         core.parse_duration(args.duration),
-        force=args.force,
     )
     _print_mutation_result(result)
+    print(
+        f"Scope      : {core.WEEKDAY_NAMES[weekday]} only; "
+        "other weekdays keep the base daily limit"
+    )
+
+
+def command_limits(args):
+    """Print the effective weekly policy an administrator can audit."""
+    limits, overrides, schedules = core.load_effective_policy()
+    view = core.weekly_policy_view(args.username, limits, overrides, schedules)
+
+    print(f"Effective weekly policy for {args.username}")
+    print(f"Base daily limit : {human(limits[args.username])}")
+    print()
+    print(f"{'DAY':<5} {'DAILY LIMIT':>12} {'SOURCE':>9}  SCHEDULES")
+    print("-" * 66)
+
+    today_weekday = core.local_now().weekday()
+
+    for weekday, limit, slots in view:
+        if slots:
+            detail = ", ".join(
+                f"{slot.slot_id} ({human(slot.quota_seconds)})"
+                for slot in slots
+            )
+        else:
+            detail = "no scheduled restriction"
+
+        marker = "*" if weekday == today_weekday else " "
+
+        print(
+            f"{core.WEEKDAY_NAMES[weekday]:<4}{marker} "
+            f"{fmt(limit.seconds):>12} "
+            f"{limit.source:>9}  {detail}"
+        )
+
+    print()
+    print("* = today")
+
+    if not schedules.get(args.username):
+        print(
+            "This user has no schedules, so the daily limit applies for the "
+            "whole global access window."
+        )
+
+
+def command_validate(args):
+    """Validate every policy file; non-zero exit means unsafe to activate."""
+    report = core.validate_policy()
+
+    print("Policy validation: OK")
+    print(f"  limits          : {report['config']}")
+    print(f"  schedules       : {report['schedule_config']}")
+    print(f"  weekday limits  : {report['daily_config']}")
+    print(
+        "  access window   : "
+        f"{report['access_window'][0]}–{report['access_window'][1]}"
+    )
+    print(f"  configured users: {len(report['users'])}")
+    print(
+        f"  schedules       : {report['schedule_count']} "
+        f"across {len(report['scheduled_users'])} user(s)"
+    )
+    print(
+        f"  weekday limits  : {report['override_count']} "
+        f"across {len(report['override_users'])} user(s)"
+    )
+
+
+def command_schedule_list(args):
+    limits, overrides, schedules = core.load_effective_policy()
+
+    if args.username not in limits:
+        raise ChildTimeError(f"User is not configured: {args.username}")
+
+    slots = sorted(
+        schedules.get(args.username, []),
+        key=lambda item: (item.start_minute, item.end_minute, item.slot_id),
+    )
+
+    if not slots:
+        print(f"{args.username} has no schedules.")
+        print(
+            "The daily limit applies across the whole global access window. "
+            f"Add one with: child-time schedule add {args.username} "
+            "--days mon-fri --start 15:00 --end 17:00 --quota 1h"
+        )
+        return
+
+    print(f"Schedules for {args.username}")
+    print()
+    print(f"{'SCHEDULE_ID':<24} {'DAYS':<12} {'WINDOW':<13} {'QUOTA':>8}")
+    print("-" * 66)
+
+    for slot in slots:
+        window = (
+            f"{slot.start_minute // 60:02d}:{slot.start_minute % 60:02d}-"
+            f"{slot.end_minute // 60:02d}:{slot.end_minute % 60:02d}"
+        )
+        print(
+            f"{slot.slot_id:<24} "
+            f"{core.format_weekday_set(slot.days):<12} "
+            f"{window:<13} "
+            f"{human(slot.quota_seconds):>8}"
+        )
+
+
+def _print_schedule_mutation(result):
+    print(f"User       : {result.username}")
+    print(f"Action     : {result.action}")
+    if result.previous_slot_id and result.previous_slot_id != result.slot_id:
+        print(f"Schedule   : {result.previous_slot_id} -> {result.slot_id}")
+        print(
+            "Note       : changing the days or the window changes the "
+            "schedule identifier, so that schedule's usage for today "
+            "restarts from zero"
+        )
+    else:
+        print(f"Schedule   : {result.slot_id}")
+    print("Reload     : automatic; service restart is not required")
+
+
+def command_schedule_add(args):
+    result = core.add_schedule(
+        args.username,
+        args.days,
+        args.start,
+        args.end,
+        core.parse_duration(args.quota),
+    )
+    _print_schedule_mutation(result)
+
+
+def command_schedule_edit(args):
+    result = core.edit_schedule(
+        args.username,
+        args.schedule_id,
+        days=args.days,
+        start=args.start,
+        end=args.end,
+        quota_seconds=(
+            None if args.quota is None else core.parse_duration(args.quota)
+        ),
+    )
+    _print_schedule_mutation(result)
+
+
+def command_schedule_remove(args):
+    result = core.remove_schedule(args.username, args.schedule_id)
+    _print_schedule_mutation(result)
 
 
 def command_add(args):
@@ -245,6 +435,83 @@ def build_parser():
     set_cmd.add_argument("username")
     set_cmd.add_argument("duration")
     set_cmd.add_argument("--force", action="store_true")
+    set_cmd.add_argument(
+        "--day",
+        metavar="DAY",
+        help=(
+            "set this weekday's daily limit only (mon..sun); "
+            "omit to set the base limit for every weekday"
+        ),
+    )
+
+    limits_cmd = sub.add_parser(
+        "limits",
+        help="show the effective per-weekday policy for a user",
+    )
+    limits_cmd.add_argument("username")
+
+    sub.add_parser(
+        "validate",
+        help="validate every policy file without changing anything",
+    )
+
+    schedule = sub.add_parser(
+        "schedule",
+        help="manage a user's weekly scheduled quotas",
+    )
+    schedule_sub = schedule.add_subparsers(
+        dest="schedule_command",
+        required=True,
+    )
+
+    schedule_list = schedule_sub.add_parser(
+        "list",
+        help="list a user's schedules",
+    )
+    schedule_list.add_argument("username")
+
+    schedule_add = schedule_sub.add_parser(
+        "add",
+        help="add a schedule for a user",
+    )
+    schedule_add.add_argument("username")
+    schedule_add.add_argument(
+        "--days",
+        help=(
+            "weekday expression, for example: fri | mon-fri | sat,sun | "
+            "daily (default: daily)"
+        ),
+    )
+    schedule_add.add_argument("--start", required=True, metavar="HH:MM")
+    schedule_add.add_argument("--end", required=True, metavar="HH:MM")
+    schedule_add.add_argument(
+        "--quota",
+        required=True,
+        metavar="DURATION",
+        help="active-use quota inside the window, for example 1h or 90m",
+    )
+
+    schedule_edit = schedule_sub.add_parser(
+        "edit",
+        help="edit one of a user's schedules",
+    )
+    schedule_edit.add_argument("username")
+    schedule_edit.add_argument(
+        "schedule_id",
+        metavar="SCHEDULE_ID",
+        help="identifier shown by `child-time schedule list`",
+    )
+    schedule_edit.add_argument("--days")
+    schedule_edit.add_argument("--start", metavar="HH:MM")
+    schedule_edit.add_argument("--end", metavar="HH:MM")
+    schedule_edit.add_argument("--quota", metavar="DURATION")
+
+    schedule_remove = schedule_sub.add_parser(
+        "remove",
+        help="remove one of a user's schedules",
+    )
+    schedule_remove.add_argument("username")
+    schedule_remove.add_argument("schedule_id", metavar="SCHEDULE_ID")
 
     add = sub.add_parser("add", help="add time to a user's total daily limit")
     add.add_argument("username")
@@ -292,6 +559,23 @@ def main(argv=None):
             command_subtract(args)
         elif args.command == "until":
             command_until(args)
+        elif args.command == "limits":
+            validate_username(args.username)
+            command_limits(args)
+        elif args.command == "validate":
+            command_validate(args)
+        elif args.command == "schedule":
+            validate_username(args.username)
+            if args.schedule_command == "list":
+                command_schedule_list(args)
+            elif args.schedule_command == "add":
+                command_schedule_add(args)
+            elif args.schedule_command == "edit":
+                command_schedule_edit(args)
+            elif args.schedule_command == "remove":
+                command_schedule_remove(args)
+            else:
+                parser.error("unknown schedule command")
         else:
             parser.error("unknown command")
     except ChildTimeError as exc:
